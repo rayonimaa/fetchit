@@ -45,4 +45,16 @@ set GOARCH=arm64
 go build -ldflags "-s -w" -o dist\fetchit-darwin-arm64 .
 if errorlevel 1 exit /b 1
 
-echo Done! All binaries built in dist\
+echo Installing locally to user CLI...
+for /f "usebackq tokens=*" %%i in (`go env GOPATH`) do (
+    if not exist "%%i\bin" mkdir "%%i\bin"
+    copy /y dist\fetchit-windows-amd64.exe "%%i\bin\fetchit.exe" >nul
+)
+if exist "%USERPROFILE%\go\bin" (
+    copy /y dist\fetchit-windows-amd64.exe "%USERPROFILE%\go\bin\fetchit.exe" >nul
+)
+if exist "%USERPROFILE%\.local\bin" (
+    copy /y dist\fetchit-windows-amd64.exe "%USERPROFILE%\.local\bin\fetchit.exe" >nul
+)
+
+echo Done! All binaries built in dist\ and installed locally to CLI.
