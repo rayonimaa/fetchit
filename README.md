@@ -1,6 +1,6 @@
 # fetchit
 
-Codex-style YouTube downloader. One binary, no installs. Auto-downloads yt-dlp and ffmpeg on first run.
+CLI-based video/audio downloader. One binary, no installs. Auto-downloads yt-dlp and ffmpeg on first run.
 
 ## Download
 
