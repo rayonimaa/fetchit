@@ -155,9 +155,9 @@ func printHeader(outDir string) {
 	}
 
 	w := 54
-	title := ">_ fetchit (v1.0)"
-	line1 := "engine:    yt-dlp + ffmpeg"
-	line2 := "directory: " + shortDir
+	title := ">_ fetchit"
+	line1 := "v1.0 stable"
+	line2 := "custom engine:    yt-dlp, ffmpeg, spotify"
 
 	maxInner := w - 4 // border takes 2 chars on each side + 1 space each: "│ " ... " │"
 	if stringWidth(line2) > maxInner {
@@ -1057,7 +1057,7 @@ func interactiveWizard(cfg *Config) error {
 	}
 	cfg.OutputDir = dirChoice
 
-	urlChoice, err := runWizardText("YouTube URL", "")
+	urlChoice, err := runWizardText("Media URL (YouTube / Spotify)", "")
 	if err != nil {
 		return err
 	}
@@ -1209,6 +1209,16 @@ func main() {
 	failedCount := 0
 
 	for idx, url := range cfg.URLs {
+		if isSpotifyURL(url) {
+			logPhase(fmt.Sprintf("[%d/%d] Spotify: %s", idx+1, len(cfg.URLs), url))
+			saved, spErr := runSpotifyDownload(cfg, binDir, url)
+			if spErr != nil {
+				failedCount++
+			}
+			allSavedFiles = append(allSavedFiles, saved...)
+			continue
+		}
+
 		logPhase(fmt.Sprintf("[%d/%d] Resolving %s", idx+1, len(cfg.URLs), url))
 
 		info, err := resolveMedia(binDir, url, cfg.Debug)
