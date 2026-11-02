@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -435,7 +436,13 @@ func fetchSpotifyTracks(pythonBin, helperPath string, info *spotifyURLInfo) ([]S
 		for scanner.Scan() {
 			line := scanner.Text()
 			if strings.HasPrefix(line, "PLAYLIST_NAME:") {
-				playlistName = strings.TrimPrefix(line, "PLAYLIST_NAME:")
+				rawName := strings.TrimPrefix(line, "PLAYLIST_NAME:")
+				decodedName, err := strconv.Unquote(`"` + rawName + `"`)
+				if err == nil {
+					playlistName = decodedName
+				} else {
+					playlistName = rawName
+				}
 			} else {
 				stderrBuf.WriteString(line + "\n")
 			}
@@ -482,13 +489,21 @@ func downloadSpotifyTrack(cfg *Config, binDir string, track SpotifyTrack, trackN
 	}
 	_ = os.MkdirAll(outDir, 0755)
 
-	// Build output template
-	var outputTemplate string
-	if totalTracks > 1 {
-		outputTemplate = filepath.Join(outDir, fmt.Sprintf("%02d - %%(title)s.%%(ext)s", trackNum))
-	} else {
-		outputTemplate = filepath.Join(outDir, "%(title)s.%(ext)s")
+	// Build output template using dynamic naming system
+	meta := FileMeta{
+		Title:       track.Title,
+		Artist:      track.Artists,
+		Album:       track.Album,
+		TrackNumber: trackNum,
+		Extension:   ".%(ext)s",
 	}
+	opts := cfg.NamingOpts
+	opts.IsPlaylist = (totalTracks > 1)
+	if totalTracks <= 1 && !cfg.ExplicitNumbering {
+		opts.IncludeNumbering = false
+	}
+	outputFilename := generateFilename(meta, opts)
+	outputTemplate := filepath.Join(outDir, outputFilename)
 
 	// Build a temp file to capture the final path
 	tmpFileList, err := os.CreateTemp("", "fetchit-spotify-*.txt")
@@ -797,17 +812,7 @@ func runSpotifyDownload(cfg *Config, binDir, url string) ([]string, error) {
 
 // sanitizeFilename makes a string safe for use as a directory/file name
 func sanitizeFilename(name string) string {
-	// Remove characters that are illegal in Windows filenames
-	illegal := []string{"<", ">", ":", "\"", "/", "\\", "|", "?", "*"}
-	result := name
-	for _, ch := range illegal {
-		result = strings.ReplaceAll(result, ch, "")
-	}
-	result = strings.TrimSpace(result)
-	if result == "" {
-		return "Unknown"
-	}
-	return result
+	return sanitizeBaseName(name)
 }
 
 // ---------------------------------------------------------------------------
