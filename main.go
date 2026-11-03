@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bufio"
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,9 +16,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ulikunitz/xz"
 	"golang.org/x/term"
@@ -155,9 +154,9 @@ func printHeader(outDir string) {
 	}
 
 	w := 54
-	title := ">_ fetchit (v1.0)"
-	line1 := "engine:    yt-dlp + ffmpeg"
-	line2 := "directory: " + shortDir
+	title := ">_ fetchit"
+	line1 := "v1.0 stable"
+	line2 := "customized engine:   yt-dlp, ffmpeg, spotify"
 
 	maxInner := w - 4 // border takes 2 chars on each side + 1 space each: "│ " ... " │"
 	if stringWidth(line2) > maxInner {
@@ -181,17 +180,174 @@ func printHeader(outDir string) {
 	fmt.Printf("%s╰%s╯%s\n\n", colGutter, strings.Repeat("─", w-2), colReset)
 }
 
+// ---------------------------------------------------------------------------
+// Dynamic Naming Engine
+// ---------------------------------------------------------------------------
+
+// FileMeta menyimpan data mentah lagu yang ditarik dari metadatanya
+type FileMeta struct {
+	Title       string
+	Artist      string
+	Album       string
+	TrackNumber int
+	Extension   string // contoh: ".mp3", "mp3", atau ".%(ext)s"
+}
+
+// RenameOptions menyimpan status konfigurasi naming milikmu
+type RenameOptions struct {
+	IncludeArtist    bool
+	IncludeAlbum     bool
+	IncludeTitle     bool
+	IsPlaylist       bool
+	IncludeNumbering bool
+}
+
+// DefaultRenameOptions mengembalikan konfigurasi default yang direkomendasikan
+func DefaultRenameOptions(isPlaylist bool) RenameOptions {
+	return RenameOptions{
+		IncludeArtist:    true,
+		IncludeAlbum:     false,
+		IncludeTitle:     true,
+		IsPlaylist:       isPlaylist,
+		IncludeNumbering: isPlaylist,
+	}
+}
+
+// Windows-reserved device names (case-insensitive base name)
+var reservedDeviceNames = map[string]bool{
+	"CON": true, "PRN": true, "AUX": true, "NUL": true,
+	"COM1": true, "COM2": true, "COM3": true, "COM4": true,
+	"COM5": true, "COM6": true, "COM7": true, "COM8": true, "COM9": true,
+	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true,
+	"LPT5": true, "LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+}
+
+// sanitizeBaseName membersihkan karakter ilegal lintas OS (Windows, Linux, macOS),
+// menghapus karakter kontrol tersembunyi, menormalkan spasi,
+// menghapus trailing dot/space yang dilarang Windows, dan menangani nama DOS reserved.
+func sanitizeBaseName(name string) string {
+	// 1. Bersihkan karakter terlarang OS: < > : " / \ | ? *
+	invalidChars := []string{"<", ">", ":", "\"", "/", "\\", "|", "?", "*"}
+	clean := name
+	for _, ch := range invalidChars {
+		clean = strings.ReplaceAll(clean, ch, "_")
+	}
+
+	// 2. Bersihkan karakter kontrol non-printable (0x00 - 0x1f, 0x7f)
+	var b strings.Builder
+	for _, r := range clean {
+		if r < 32 || r == 127 {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	clean = b.String()
+
+	// 3. Normalisasi spasi dan underscore yang bertumpuk
+	clean = strings.Join(strings.Fields(clean), " ")
+
+	// 4. Hapus spasi dan titik di akhir nama (Windows melarang trailing dot/space)
+	clean = strings.TrimRight(clean, " ._")
+	clean = strings.TrimLeft(clean, " ")
+
+	// 5. Fallback pengamanan jika nama kosong setelah disanitasi
+	if clean == "" {
+		clean = "Track"
+	}
+
+	// 6. Tangani nama file reserved Windows (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+	upperBase := strings.ToUpper(clean)
+	if reservedDeviceNames[upperBase] {
+		clean = "_" + clean
+	}
+
+	// 7. Batasi panjang maksimal (240 bytes) agar aman di batas 255 bytes Linux/Windows
+	if len(clean) > 240 {
+		for len(clean) > 240 {
+			_, size := utf8.DecodeLastRuneInString(clean)
+			if size == 0 {
+				break
+			}
+			clean = clean[:len(clean)-size]
+		}
+		clean = strings.TrimRight(clean, " ._")
+	}
+
+	return clean
+}
+
+// generateFilename akan merakit nama file secara dinamis sesuai konfigurasi
+func generateFilename(meta FileMeta, opts RenameOptions) string {
+	var parts []string
+
+	// Fallback pengamanan jika kamu ceroboh dan tidak mencentang apa pun
+	if !opts.IncludeTitle && !opts.IncludeArtist && !opts.IncludeAlbum {
+		opts.IncludeTitle = true
+	}
+
+	// Rapikan setiap input metadata
+	artist := strings.TrimSpace(meta.Artist)
+	album := strings.TrimSpace(meta.Album)
+	title := strings.TrimSpace(meta.Title)
+
+	// Urutan: Artist - Album - Title
+	if opts.IncludeArtist && artist != "" {
+		parts = append(parts, artist)
+	}
+	if opts.IncludeAlbum && album != "" {
+		parts = append(parts, album)
+	}
+	if opts.IncludeTitle && title != "" {
+		parts = append(parts, title)
+	}
+
+	var baseName string
+	if len(parts) == 0 {
+		if meta.TrackNumber > 0 {
+			baseName = fmt.Sprintf("Track %d", meta.TrackNumber)
+		} else {
+			baseName = "Track"
+		}
+	} else {
+		// Gabungkan bagian-bagian yang terpilih
+		baseName = strings.Join(parts, " - ")
+	}
+
+	// Jika ini playlist dan kamu mencentang penomoran di depan
+	if opts.IsPlaylist && opts.IncludeNumbering && meta.TrackNumber > 0 {
+		// Format dua digit (01, 02, dst)
+		baseName = fmt.Sprintf("%02d - %s", meta.TrackNumber, baseName)
+	}
+
+	// Sanitasi: Bersihkan karakter yang dilarang oleh OS
+	baseName = sanitizeBaseName(baseName)
+
+	// Format ekstensi dengan titik pemisah jika belum ada
+	ext := strings.TrimSpace(meta.Extension)
+	if ext != "" && !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+
+	return baseName + ext
+}
+
+// ---------------------------------------------------------------------------
+// Configuration & Dependency Management
+// ---------------------------------------------------------------------------
+
 type Config struct {
-	Format    string
-	Quality   string
-	OutputDir string
-	Verbose   bool
-	Debug     bool
-	Bootstrap bool
-	Clean     bool
-	AssumeYes bool
-	DryRun    bool
-	URLs      []string
+	Format            string
+	Quality           string
+	OutputDir         string
+	Verbose           bool
+	Debug             bool
+	Bootstrap         bool
+	Clean             bool
+	AssumeYes         bool
+	DryRun            bool
+	URLs              []string
+	NamingOpts        RenameOptions
+	ExplicitNumbering bool
 }
 
 func getBinDir() (string, error) {
@@ -517,125 +673,9 @@ func preflightFFmpeg(binDir string) error {
 	return nil
 }
 
-func isAudioFormat(fmtStr string) bool {
-	switch strings.ToLower(fmtStr) {
-	case "mp3", "m4a", "opus", "flac", "wav", "aac":
-		return true
-	default:
-		return false
-	}
-}
-
-func buildVideoFormatString(fmtStr, quality string) string {
-	f := strings.ToLower(fmtStr)
-	var heightFilter string
-	q := strings.ToLower(quality)
-	switch q {
-	case "best", "":
-		heightFilter = ""
-	case "8k":
-		heightFilter = "[height<=4320]"
-	case "4k":
-		heightFilter = "[height<=2160]"
-	case "2k", "1440":
-		heightFilter = "[height<=1440]"
-	default:
-		num := ""
-		for _, r := range q {
-			if unicode.IsDigit(r) {
-				num += string(r)
-			}
-		}
-		if num != "" {
-			heightFilter = fmt.Sprintf("[height<=%s]", num)
-		}
-	}
-
-	vcodec := ""
-	acodec := ""
-	switch f {
-	case "mp4":
-		vcodec = "[vcodec^=avc1]"
-		acodec = "[acodec^=mp4a]"
-	case "webm":
-		vcodec = "[vcodec^=vp9]"
-		acodec = "[acodec^=opus]"
-	}
-
-	if vcodec != "" {
-		return fmt.Sprintf("bestvideo%s%s+bestaudio%s/bestvideo%s+bestaudio/best%s/best",
-			heightFilter, vcodec, acodec, heightFilter, heightFilter)
-	}
-	return fmt.Sprintf("bestvideo%s+bestaudio/best%s/best", heightFilter, heightFilter)
-}
-
-func checkIsPlaylist(binDir, url string, verbose bool) bool {
-	ytDlp := filepath.Join(binDir, ytDlpBinaryName())
-	cmd := exec.Command(ytDlp, "--flat-playlist", "--skip-download", "--print", "%(playlist_count)s", url)
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, l := range lines {
-		l = strings.TrimSpace(l)
-		if count, err := strconv.Atoi(l); err == nil && count > 1 {
-			return true
-		}
-	}
-	return false
-}
-
-type ResolveInfo struct {
-	Title         string
-	Duration      string
-	Channel       string
-	PlaylistTitle string
-}
-
-func resolveMedia(binDir, url string, debug bool) (*ResolveInfo, error) {
-	ytDlp := filepath.Join(binDir, ytDlpBinaryName())
-	args := []string{
-		"--no-warnings",
-		"--skip-download",
-		"--ffmpeg-location", binDir,
-		"--print", "%(title)s",
-		"--print", "%(duration_string)s",
-		"--print", "%(uploader,channel|unknown)s",
-		"--print", "%(playlist_title)s",
-		url,
-	}
-	cmd := exec.Command(ytDlp, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg == "" {
-			errMsg = err.Error()
-		}
-		if debug {
-			logErr(fmt.Sprintf("resolve failed stderr dump:\n%s", errMsg))
-		}
-		return nil, errors.New(errMsg)
-	}
-
-	lines := strings.Split(string(out), "\n")
-	info := &ResolveInfo{}
-	if len(lines) > 0 {
-		info.Title = strings.TrimSpace(lines[0])
-	}
-	if len(lines) > 1 {
-		info.Duration = strings.TrimSpace(lines[1])
-	}
-	if len(lines) > 2 {
-		info.Channel = strings.TrimSpace(lines[2])
-	}
-	if len(lines) > 3 {
-		info.PlaylistTitle = strings.TrimSpace(lines[3])
-	}
-	return info, nil
-}
+// ---------------------------------------------------------------------------
+// Terminal Progress UI
+// ---------------------------------------------------------------------------
 
 func drawProgressBar(spinnerIdx int, pct float64, speed, eta, status string) {
 	if !isTerminalStdout {
@@ -694,221 +734,10 @@ func parsePercent(s string) float64 {
 	return val
 }
 
-func runDownload(cfg *Config, binDir, url string) ([]string, error) {
-	ytDlp := filepath.Join(binDir, ytDlpBinaryName())
-
-	isPL := checkIsPlaylist(binDir, url, cfg.Verbose)
-
-	tmpFileList, err := os.CreateTemp("", "fetchit-files-*.txt")
-	if err != nil {
-		return nil, err
-	}
-	tmpFilePath := tmpFileList.Name()
-	tmpFileList.Close()
-	defer os.Remove(tmpFilePath)
-
-	var outputTemplate string
-	if isPL {
-		outputTemplate = filepath.Join(cfg.OutputDir, "%(playlist_title|Playlist)s", "%(playlist_index)s - %(title)s.%(ext)s")
-	} else {
-		outputTemplate = filepath.Join(cfg.OutputDir, "%(title)s.%(ext)s")
-	}
-
-	args := []string{
-		"--newline",
-		"--ffmpeg-location", binDir,
-		"-o", outputTemplate,
-		"--print-to-file", "after_move:filepath", tmpFilePath,
-	}
-
-	if isPL {
-		args = append(args, "--yes-playlist")
-	} else {
-		args = append(args, "--no-playlist")
-	}
-
-	formatLower := strings.ToLower(cfg.Format)
-	if isAudioFormat(formatLower) {
-		args = append(args, "--extract-audio", "--audio-format", formatLower)
-		qLower := strings.ToLower(cfg.Quality)
-		if formatLower != "flac" && formatLower != "wav" {
-			if qLower == "best" || qLower == "" {
-				args = append(args, "--audio-quality", "0")
-			} else {
-				kbps := strings.TrimSuffix(qLower, "k")
-				args = append(args, "--audio-quality", kbps+"K")
-			}
-		}
-	} else {
-		// Video
-		formatStr := buildVideoFormatString(formatLower, cfg.Quality)
-		args = append(args, "-f", formatStr, "--merge-output-format", formatLower)
-	}
-
-	// Metadata
-	args = append(args, "--embed-metadata")
-	if formatLower != "wav" {
-		args = append(args, "--embed-thumbnail")
-	}
-
-	// Progress template or non-tty
-	if !isTerminalStdout || cfg.Verbose {
-		if !isTerminalStdout {
-			args = append(args, "--no-progress")
-		}
-	} else {
-		args = append(args, "--progress-template", "download:PROGRESS:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s")
-	}
-
-	args = append(args, url)
-
-	if cfg.Verbose {
-		logTool(fmt.Sprintf("%s %s", ytDlp, strings.Join(args, " ")))
-	}
-
-	if cfg.DryRun {
-		logSubKV("dry-run", fmt.Sprintf("%s %s", ytDlp, strings.Join(args, " ")))
-		return nil, nil
-	}
-
-	cmd := exec.Command(ytDlp, args...)
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-
-	var spinnerIdx int32
-	var lastPct float64 = -1
-	var lastSpeed, lastEta, lastStatus string
-	lastStatus = "fetching media…"
-
-	stopTicker := make(chan struct{})
-	var tickerWG sync.WaitGroup
-	if isTerminalStdout && !cfg.Verbose {
-		tickerWG.Add(1)
-		go func() {
-			defer tickerWG.Done()
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-stopTicker:
-					return
-				case <-ticker.C:
-					idx := atomic.AddInt32(&spinnerIdx, 1)
-					drawProgressBar(int(idx), lastPct, lastSpeed, lastEta, lastStatus)
-				}
-			}
-		}()
-	}
-
-	processLine := func(line string) {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			return
-		}
-
-		if strings.HasPrefix(line, "PROGRESS:") {
-			parts := strings.Split(strings.TrimPrefix(line, "PROGRESS:"), "|")
-			if len(parts) >= 3 {
-				lastPct = parsePercent(parts[0])
-				lastSpeed = strings.TrimSpace(parts[1])
-				lastEta = strings.TrimSpace(parts[2])
-			}
-			return
-		}
-
-		if strings.HasPrefix(line, "ERROR:") || strings.HasPrefix(line, "[error]") {
-			clearLine()
-			logErr(line)
-			return
-		}
-		if strings.HasPrefix(line, "WARNING:") || strings.HasPrefix(line, "[warning]") {
-			if strings.Contains(line, "JavaScript runtime") {
-				return
-			}
-			clearLine()
-			logWarn(line)
-			return
-		}
-
-		switch {
-		case strings.HasPrefix(line, "[download] Destination:"):
-			lastStatus = "saving segments…"
-		case strings.HasPrefix(line, "[Merger]"):
-			lastStatus = "merging streams…"
-		case strings.HasPrefix(line, "[ExtractAudio]"):
-			lastStatus = "extracting audio…"
-		case strings.HasPrefix(line, "[VideoConvertor]"):
-			lastStatus = "converting format…"
-		case strings.HasPrefix(line, "[EmbedThumbnail]"):
-			lastStatus = "embedding cover art…"
-		case strings.HasPrefix(line, "[Metadata]"):
-			lastStatus = "writing metadata…"
-		case strings.HasPrefix(line, "[MoveFiles]"):
-			lastStatus = "moving final file…"
-		case strings.HasPrefix(line, "[FixupM3u8]"):
-			lastStatus = "fixing m3u8…"
-		case strings.HasPrefix(line, "[ThumbnailsConvertor]"):
-			lastStatus = "converting cover…"
-		default:
-			if cfg.Verbose {
-				logSub(line)
-			}
-		}
-	}
-
-	go func() {
-		scanner := bufio.NewScanner(stderrPipe)
-		for scanner.Scan() {
-			processLine(scanner.Text())
-		}
-	}()
-
-	scanner := bufio.NewScanner(stdoutPipe)
-	for scanner.Scan() {
-		processLine(scanner.Text())
-	}
-
-	waitErr := cmd.Wait()
-	close(stopTicker)
-	tickerWG.Wait()
-	clearLine()
-
-	// Read registered downloaded files
-	var savedFiles []string
-	if data, err := os.ReadFile(tmpFilePath); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, l := range lines {
-			l = strings.TrimSpace(l)
-			if l != "" {
-				if _, err := os.Stat(l); err == nil {
-					savedFiles = append(savedFiles, l)
-				}
-			}
-		}
-	}
-
-	if waitErr != nil {
-		if len(savedFiles) > 0 {
-			logWarn(fmt.Sprintf("partial: %d file(s) saved", len(savedFiles)))
-		}
-		return savedFiles, waitErr
-	}
-
-	return savedFiles, nil
-}
-
+// ---------------------------------------------------------------------------
 // Interactive Wizard
+// ---------------------------------------------------------------------------
+
 func runWizardMenu(prompt string, options []string) (string, error) {
 	if !isTerminalStdin || !isTerminalStdout {
 		fmt.Printf("  • %s\n", prompt)
@@ -1014,8 +843,6 @@ func runWizardText(prompt, defaultValue string) (string, error) {
 }
 
 func interactiveWizard(cfg *Config) error {
-	logPhase("Interactive Setup")
-
 	mode, err := runWizardMenu("Select media type", []string{"video", "audio"})
 	if err != nil {
 		return err
@@ -1057,7 +884,7 @@ func interactiveWizard(cfg *Config) error {
 	}
 	cfg.OutputDir = dirChoice
 
-	urlChoice, err := runWizardText("YouTube URL", "")
+	urlChoice, err := runWizardText("Media URL (YouTube / Spotify)", "")
 	if err != nil {
 		return err
 	}
@@ -1092,11 +919,18 @@ Options:
   -m, --mp3              shorthand for -f mp3
   -v, --mp4              shorthand for -f mp4
   -n, --dry-run          print resolved yt-dlp argv, don't download
+  --no-artist            omit artist from output filename
+  --album                include album name in output filename
+  --no-numbering         omit track numbering in playlist downloads
   -h, --help             print help with the codex box header
   --version              print "fetchit 1.0"
 
 No URLs → interactive wizard (arrow-key menus).`)
 }
+
+// ---------------------------------------------------------------------------
+// Main Entry Point
+// ---------------------------------------------------------------------------
 
 func main() {
 	initColors()
@@ -1105,15 +939,20 @@ func main() {
 	defaultDownloads := filepath.Join(homeDir, "Downloads")
 
 	cfg := &Config{
-		Format:    "mp4",
-		Quality:   "best",
-		OutputDir: defaultDownloads,
+		Format:     "mp4",
+		Quality:    "best",
+		OutputDir:  defaultDownloads,
+		NamingOpts: DefaultRenameOptions(false),
 	}
 
 	var showHelp bool
 	var showVersion bool
 	var mp3Flag bool
 	var mp4Flag bool
+	var noArtistFlag bool
+	var includeAlbumFlag bool
+	var numberingFlag bool
+	var noNumberingFlag bool
 
 	fs := flag.NewFlagSet("fetchit", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -1137,6 +976,11 @@ func main() {
 	fs.BoolVar(&mp4Flag, "mp4", false, "")
 	fs.BoolVar(&cfg.DryRun, "n", false, "")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "")
+	fs.BoolVar(&noArtistFlag, "no-artist", false, "")
+	fs.BoolVar(&includeAlbumFlag, "album", false, "")
+	fs.BoolVar(&includeAlbumFlag, "include-album", false, "")
+	fs.BoolVar(&numberingFlag, "numbering", false, "")
+	fs.BoolVar(&noNumberingFlag, "no-numbering", false, "")
 	fs.BoolVar(&showHelp, "h", false, "")
 	fs.BoolVar(&showHelp, "help", false, "")
 	fs.BoolVar(&showVersion, "version", false, "")
@@ -1160,6 +1004,20 @@ func main() {
 		cfg.Format = "mp3"
 	} else if mp4Flag {
 		cfg.Format = "mp4"
+	}
+
+	if noArtistFlag {
+		cfg.NamingOpts.IncludeArtist = false
+	}
+	if includeAlbumFlag {
+		cfg.NamingOpts.IncludeAlbum = true
+	}
+	if noNumberingFlag {
+		cfg.NamingOpts.IncludeNumbering = false
+		cfg.ExplicitNumbering = true
+	} else if numberingFlag {
+		cfg.NamingOpts.IncludeNumbering = true
+		cfg.ExplicitNumbering = true
 	}
 
 	if cfg.Debug {
@@ -1209,6 +1067,16 @@ func main() {
 	failedCount := 0
 
 	for idx, url := range cfg.URLs {
+		if isSpotifyURL(url) {
+			logPhase(fmt.Sprintf("[%d/%d] Spotify: %s", idx+1, len(cfg.URLs), url))
+			saved, spErr := runSpotifyDownload(cfg, binDir, url)
+			if spErr != nil {
+				failedCount++
+			}
+			allSavedFiles = append(allSavedFiles, saved...)
+			continue
+		}
+
 		logPhase(fmt.Sprintf("[%d/%d] Resolving %s", idx+1, len(cfg.URLs), url))
 
 		info, err := resolveMedia(binDir, url, cfg.Debug)
