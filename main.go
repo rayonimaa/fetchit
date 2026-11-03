@@ -735,55 +735,64 @@ func parsePercent(s string) float64 {
 }
 
 // ---------------------------------------------------------------------------
-// Interactive Wizard
+// Interactive Wizard – checkbox-style UI
 // ---------------------------------------------------------------------------
 
-func runWizardMenu(prompt string, options []string) (string, error) {
+// runCheckbox presents a single-select radio-style checkbox list.
+// The cursor row is highlighted in accent blue with a filled [✓].
+// All other rows show a dim [ ] unchecked box.
+// Returns the selected option value.
+func runCheckbox(prompt string, options []string, defaultIdx int) (string, error) {
 	if !isTerminalStdin || !isTerminalStdout {
-		fmt.Printf("  • %s\n", prompt)
+		fmt.Printf("  • %s\r\n", prompt)
 		for i, opt := range options {
-			fmt.Printf("    %d) %s\n", i+1, opt)
+			marker := "[ ]"
+			if i == defaultIdx {
+				marker = "[✓]"
+			}
+			fmt.Printf("    %s %d) %s\r\n", marker, i+1, opt)
 		}
 		fmt.Print("  Choice [1]: ")
 		var input string
 		fmt.Scanln(&input)
 		input = strings.TrimSpace(input)
-		idx := 1
+		idx := defaultIdx
 		if input != "" {
 			if v, err := strconv.Atoi(input); err == nil && v >= 1 && v <= len(options) {
-				idx = v
+				idx = v - 1
 			}
 		}
-		res := options[idx-1]
-		logOK(fmt.Sprintf("%s: %s", prompt, res))
+		res := options[idx]
+		fmt.Printf("  %s✓%s %s: %s%s%s\r\n", colGreen, colReset, prompt, colAccent, res, colReset)
 		return res, nil
 	}
 
-	// TTY Raw Mode Arrow Menu
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
-		return options[0], err
+		return options[defaultIdx], err
 	}
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	selectedIndex := 0
+	cursor := defaultIdx
+	if cursor < 0 || cursor >= len(options) {
+		cursor = 0
+	}
 	numOptions := len(options)
 
 	draw := func() {
-		// Output raw newlines: \r\n
-		out := fmt.Sprintf("\r  • %s%s%s\r\n", colBold, prompt, colReset)
+		out := fmt.Sprintf("\r  %s•%s %s%s%s\r\n", colBold, colReset, colBold, prompt, colReset)
 		for i, opt := range options {
-			if i == selectedIndex {
-				out += fmt.Sprintf("\r    %s▸ %s%s\r\n", colAccent, opt, colReset)
+			if i == cursor {
+				// Checked, full accent row
+				out += fmt.Sprintf("\r    %s[✓] %s%s\r\n", colAccent, opt, colReset)
 			} else {
-				out += fmt.Sprintf("\r    %s  %s%s\r\n", colMuted, opt, colReset)
+				out += fmt.Sprintf("\r    %s[ ] %s%s\r\n", colMuted, opt, colReset)
 			}
 		}
 		os.Stdout.WriteString(out)
 	}
 
 	clearMenu := func() {
-		// Move cursor up (numOptions + 1) lines and clear each
 		linesToClear := numOptions + 1
 		for i := 0; i < linesToClear; i++ {
 			os.Stdout.WriteString("\033[A\r\033[K")
@@ -796,7 +805,7 @@ func runWizardMenu(prompt string, options []string) (string, error) {
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil {
-			return options[selectedIndex], err
+			return options[cursor], err
 		}
 		if n == 1 {
 			switch buf[0] {
@@ -804,18 +813,18 @@ func runWizardMenu(prompt string, options []string) (string, error) {
 				clearMenu()
 				return "", errors.New("interrupted")
 			case 13, 10: // Enter
+				chosen := options[cursor]
 				clearMenu()
 				term.Restore(int(os.Stdin.Fd()), oldState)
-				logOK(fmt.Sprintf("%s: %s", prompt, options[selectedIndex]))
-				return options[selectedIndex], nil
+				fmt.Printf("  %s✓%s %s: %s%s%s\r\n", colGreen, colReset, prompt, colAccent, chosen, colReset)
+				return chosen, nil
 			}
 		} else if n >= 3 && buf[0] == 27 && buf[1] == 91 {
-			// Escape sequence \033[
 			switch buf[2] {
 			case 'A': // Up
-				selectedIndex = (selectedIndex - 1 + numOptions) % numOptions
+				cursor = (cursor - 1 + numOptions) % numOptions
 			case 'B': // Down
-				selectedIndex = (selectedIndex + 1) % numOptions
+				cursor = (cursor + 1) % numOptions
 			}
 			clearMenu()
 			draw()
@@ -823,11 +832,13 @@ func runWizardMenu(prompt string, options []string) (string, error) {
 	}
 }
 
+// runWizardText reads a plain text answer from the user.
 func runWizardText(prompt, defaultValue string) (string, error) {
+	// Restore normal mode if in TTY (MakeRaw not active here, but just in case)
 	if defaultValue != "" {
-		fmt.Printf("  • %s [%s]: ", prompt, defaultValue)
+		fmt.Printf("  %s•%s %s %s[%s]%s: ", colBold, colReset, prompt, colMuted, defaultValue, colReset)
 	} else {
-		fmt.Printf("  • %s: ", prompt)
+		fmt.Printf("  %s•%s %s: ", colBold, colReset, prompt)
 	}
 	reader := bufio.NewReader(os.Stdin)
 	text, err := reader.ReadString('\n')
@@ -838,60 +849,224 @@ func runWizardText(prompt, defaultValue string) (string, error) {
 	if text == "" {
 		text = defaultValue
 	}
-	logOK(fmt.Sprintf("%s: %s", prompt, text))
+	fmt.Printf("  %s✓%s %s: %s%s%s\r\n", colGreen, colReset, prompt, colAccent, text, colReset)
 	return text, nil
 }
 
-func interactiveWizard(cfg *Config) error {
-	mode, err := runWizardMenu("Select media type", []string{"video", "audio"})
-	if err != nil {
-		return err
-	}
-
-	if mode == "video" {
-		fmtChoice, err := runWizardMenu("Select format", []string{"mp4", "mkv", "webm", "mov"})
-		if err != nil {
-			return err
-		}
-		cfg.Format = fmtChoice
-
-		qChoice, err := runWizardMenu("Select quality", []string{"best", "8k", "4k", "2k", "1440", "1080", "720", "480", "360"})
-		if err != nil {
-			return err
-		}
-		cfg.Quality = qChoice
-	} else {
-		fmtChoice, err := runWizardMenu("Select format", []string{"mp3", "m4a", "opus", "flac", "wav", "aac"})
-		if err != nil {
-			return err
-		}
-		cfg.Format = fmtChoice
-
-		if fmtChoice == "flac" || fmtChoice == "wav" {
-			cfg.Quality = "best"
-		} else {
-			qChoice, err := runWizardMenu("Select quality (kbps)", []string{"best", "320", "256", "192", "128"})
-			if err != nil {
-				return err
+// runMultiCheckbox presents a multi-select togglable checkbox list.
+// Space toggles, Enter confirms. Returns indices of checked items.
+func runMultiCheckbox(prompt string, options []string, checked []bool) ([]bool, error) {
+	if !isTerminalStdin || !isTerminalStdout {
+		fmt.Printf("  • %s (space=toggle, enter=confirm)\r\n", prompt)
+		for i, opt := range options {
+			marker := "[ ]"
+			if i < len(checked) && checked[i] {
+				marker = "[✓]"
 			}
-			cfg.Quality = qChoice
+			fmt.Printf("    %s %d) %s\r\n", marker, i+1, opt)
+		}
+		fmt.Print("  Toggles (e.g. 1 3): ")
+		var input string
+		reader := bufio.NewReader(os.Stdin)
+		input, _ = reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		for _, tok := range strings.Fields(input) {
+			if v, err := strconv.Atoi(tok); err == nil && v >= 1 && v <= len(options) {
+				checked[v-1] = !checked[v-1]
+			}
+		}
+		return checked, nil
+	}
+
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return checked, err
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+	cursor := 0
+	numOptions := len(options)
+
+	draw := func() {
+		out := fmt.Sprintf("\r  %s•%s %s%s%s %s(↑↓ move · space toggle · enter confirm)%s\r\n",
+			colBold, colReset, colBold, prompt, colReset, colMuted, colReset)
+		for i, opt := range options {
+			isChecked := i < len(checked) && checked[i]
+			box := "[ ]"
+			if isChecked {
+				box = "[✓]"
+			}
+			if i == cursor {
+				if isChecked {
+					out += fmt.Sprintf("\r    %s%s %s%s\r\n", colAccent, box, opt, colReset)
+				} else {
+					out += fmt.Sprintf("\r    %s%s%s %s%s\r\n", colAccent, box, colReset, opt, colReset)
+				}
+			} else {
+				if isChecked {
+					out += fmt.Sprintf("\r    %s%s %s%s\r\n", colAccent, box, opt, colReset)
+				} else {
+					out += fmt.Sprintf("\r    %s%s %s%s\r\n", colMuted, box, opt, colReset)
+				}
+			}
+		}
+		os.Stdout.WriteString(out)
+	}
+
+	clearMenu := func() {
+		linesToClear := numOptions + 1
+		for i := 0; i < linesToClear; i++ {
+			os.Stdout.WriteString("\033[A\r\033[K")
 		}
 	}
 
-	dirChoice, err := runWizardText("Save directory", cfg.OutputDir)
-	if err != nil {
-		return err
-	}
-	cfg.OutputDir = dirChoice
+	draw()
 
-	urlChoice, err := runWizardText("Paste the link (youtube/spotify)", "")
+	buf := make([]byte, 16)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			return checked, err
+		}
+		if n == 1 {
+			switch buf[0] {
+			case 3: // Ctrl+C
+				clearMenu()
+				return checked, errors.New("interrupted")
+			case 32: // Space – toggle
+				if cursor < len(checked) {
+					checked[cursor] = !checked[cursor]
+				}
+				clearMenu()
+				draw()
+			case 13, 10: // Enter – confirm
+				clearMenu()
+				term.Restore(int(os.Stdin.Fd()), oldState)
+				// Print summary of what was selected
+				var selected []string
+				for i, opt := range options {
+					if i < len(checked) && checked[i] {
+						selected = append(selected, opt)
+					}
+				}
+				if len(selected) == 0 {
+					selected = []string{"(none)"}
+				}
+				fmt.Printf("  %s✓%s %s: %s%s%s\r\n", colGreen, colReset, prompt, colAccent, strings.Join(selected, ", "), colReset)
+				return checked, nil
+			}
+		} else if n >= 3 && buf[0] == 27 && buf[1] == 91 {
+			switch buf[2] {
+			case 'A': // Up
+				cursor = (cursor - 1 + numOptions) % numOptions
+			case 'B': // Down
+				cursor = (cursor + 1) % numOptions
+			}
+			clearMenu()
+			draw()
+		}
+	}
+}
+
+func interactiveWizard(cfg *Config) error {
+	fmt.Printf("\r\n")
+
+	// ── Step 1: URL ─────────────────────────────────────────────────────────
+	urlInput, err := runWizardText("Paste the link (YouTube / Spotify / etc.)", "")
 	if err != nil {
 		return err
 	}
-	if urlChoice == "" {
+	if urlInput == "" {
 		return errors.New("no URL provided")
 	}
-	cfg.URLs = []string{urlChoice}
+	cfg.URLs = []string{urlInput}
+
+	fmt.Printf("\r\n")
+
+	// ── Step 2: Media type ───────────────────────────────────────────────────
+	mediaType, err := runCheckbox("Download type", []string{"video", "audio"}, 0)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("\r\n")
+
+	// ── Step 3: Format ───────────────────────────────────────────────────────
+	var fmtOptions []string
+	if mediaType == "video" {
+		fmtOptions = []string{"mp4", "mkv", "webm", "mov", "original"}
+	} else {
+		fmtOptions = []string{"mp3", "m4a", "opus", "flac", "wav", "aac", "original"}
+	}
+	fmtChoice, err := runCheckbox("Format", fmtOptions, 0)
+	if err != nil {
+		return err
+	}
+
+	// "original" means we skip format conversion
+	if fmtChoice == "original" {
+		if mediaType == "video" {
+			cfg.Format = "bestvideo+bestaudio/best"
+		} else {
+			cfg.Format = "bestaudio/best"
+		}
+	} else {
+		cfg.Format = fmtChoice
+	}
+
+	fmt.Printf("\r\n")
+
+	// ── Step 4: Quality ───────────────────────────────────────────────────────
+	var qualOptions []string
+	if mediaType == "video" {
+		qualOptions = []string{"best", "4k", "2k", "1080p", "720p", "480p", "360p", "original"}
+	} else {
+		if fmtChoice == "flac" || fmtChoice == "wav" || fmtChoice == "original" {
+			// lossless / original → no re-encoding quality choice
+			cfg.Quality = "best"
+			qualOptions = nil
+		} else {
+			qualOptions = []string{"best", "320k", "256k", "192k", "128k", "original"}
+		}
+	}
+
+	if qualOptions != nil {
+		qualChoice, err := runCheckbox("Quality", qualOptions, 0)
+		if err != nil {
+			return err
+		}
+		if qualChoice == "original" {
+			cfg.Quality = "best"
+		} else {
+			cfg.Quality = strings.TrimSuffix(qualChoice, "p") // strip trailing 'p' for video labels
+		}
+		fmt.Printf("\r\n")
+	}
+
+	// ── Step 5: Filename options (multi-checkbox) ────────────────────────────
+	namingLabels := []string{"include artist", "include album", "include title", "track numbering (playlists)"}
+	namingDefaults := []bool{
+		cfg.NamingOpts.IncludeArtist,
+		cfg.NamingOpts.IncludeAlbum,
+		cfg.NamingOpts.IncludeTitle,
+		cfg.NamingOpts.IncludeNumbering,
+	}
+	namingResult, err := runMultiCheckbox("Filename — include fields", namingLabels, namingDefaults)
+	if err != nil {
+		return err
+	}
+	cfg.NamingOpts.IncludeArtist = namingResult[0]
+	cfg.NamingOpts.IncludeAlbum = namingResult[1]
+	cfg.NamingOpts.IncludeTitle = namingResult[2]
+	cfg.NamingOpts.IncludeNumbering = namingResult[3]
+
+	// Guard: at least title must be on
+	if !cfg.NamingOpts.IncludeTitle && !cfg.NamingOpts.IncludeArtist && !cfg.NamingOpts.IncludeAlbum {
+		cfg.NamingOpts.IncludeTitle = true
+	}
+
+	fmt.Printf("\r\n")
+
 	return nil
 }
 

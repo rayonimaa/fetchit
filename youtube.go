@@ -146,6 +146,59 @@ func resolveMedia(binDir, url string, debug bool) (*ResolveInfo, error) {
 	return info, nil
 }
 
+// buildYtdlpOutputTemplate constructs a yt-dlp -o template string that
+// honours the user's NamingOpts (artist / album / title / numbering).
+//
+// To avoid " -  - " when optional fields are absent, we build the name by
+// conditionally including only non-empty yt-dlp field expressions using the
+// "field|" fallback (empty string when absent) and then pass
+// --replace-in-metadata to collapse any double-separator artefacts.
+//
+// The caller should also append the extra args returned by
+// buildYtdlpNamingArgs to the yt-dlp command.
+func buildYtdlpOutputTemplate(opts RenameOptions, isPL bool, outDir string) string {
+	name := buildYtdlpNameSegment(opts, isPL)
+	name += ".%(ext)s"
+	if isPL {
+		return filepath.Join(outDir, "%(playlist_title|Playlist)s", name)
+	}
+	return filepath.Join(outDir, name)
+}
+
+// buildYtdlpNameSegment returns just the filename-stem template (no ext, no dir).
+func buildYtdlpNameSegment(opts RenameOptions, isPL bool) string {
+	var parts []string
+	if isPL && opts.IncludeNumbering {
+		parts = append(parts, "%(playlist_index)s")
+	}
+	if opts.IncludeArtist {
+		// uploader,channel|  — falls back to channel, then empty string
+		parts = append(parts, "%(uploader,channel|)s")
+	}
+	if opts.IncludeAlbum {
+		parts = append(parts, "%(album|)s")
+	}
+	// Always include title unless explicitly deselected AND at least one other field is on
+	if opts.IncludeTitle || (!opts.IncludeArtist && !opts.IncludeAlbum) {
+		parts = append(parts, "%(title)s")
+	}
+	if len(parts) == 0 {
+		return "%(title)s"
+	}
+	return strings.Join(parts, " - ")
+}
+
+// buildYtdlpNamingArgs returns extra yt-dlp args that clean up empty
+// " - " separator segments produced when optional metadata fields are absent.
+// Pass these in addition to the -o template.
+func buildYtdlpNamingArgs() []string {
+	// Collapse "X -  - Y" → "X - Y" and strip leading/trailing " - "
+	return []string{
+		"--replace-in-metadata", "title", `( - ){2,}`, " - ",
+		"--replace-in-metadata", "title", `^ - | - $`, "",
+	}
+}
+
 // runDownload downloads media from a YouTube or generic yt-dlp supported URL.
 func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 	ytDlp := filepath.Join(binDir, ytDlpBinaryName())
@@ -160,16 +213,10 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 	tmpFileList.Close()
 	defer os.Remove(tmpFilePath)
 
-	var outputTemplate string
-	if isPL {
-		if !cfg.NamingOpts.IncludeNumbering && cfg.ExplicitNumbering {
-			outputTemplate = filepath.Join(cfg.OutputDir, "%(playlist_title|Playlist)s", "%(title)s.%(ext)s")
-		} else {
-			outputTemplate = filepath.Join(cfg.OutputDir, "%(playlist_title|Playlist)s", "%(playlist_index)s - %(title)s.%(ext)s")
-		}
-	} else {
-		outputTemplate = filepath.Join(cfg.OutputDir, "%(title)s.%(ext)s")
-	}
+	// Respect user's NamingOpts for the output template
+	namingOpts := cfg.NamingOpts
+	namingOpts.IsPlaylist = isPL
+	outputTemplate := buildYtdlpOutputTemplate(namingOpts, isPL, cfg.OutputDir)
 
 	args := []string{
 		"--newline",
@@ -177,6 +224,8 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 		"-o", outputTemplate,
 		"--print-to-file", "after_move:filepath", tmpFilePath,
 	}
+	// Clean up empty " - " segments from optional metadata fields
+	args = append(args, buildYtdlpNamingArgs()...)
 
 	if isPL {
 		args = append(args, "--yes-playlist")
@@ -185,7 +234,17 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 	}
 
 	formatLower := strings.ToLower(cfg.Format)
-	if isAudioFormat(formatLower) {
+
+	// "original" format: pass raw yt-dlp selector strings set by the wizard, no conversion.
+	isOriginalVideo := formatLower == "bestvideo+bestaudio/best"
+	isOriginalAudio := formatLower == "bestaudio/best"
+
+	switch {
+	case isOriginalVideo:
+		args = append(args, "-f", "bestvideo+bestaudio/best")
+	case isOriginalAudio:
+		args = append(args, "-f", "bestaudio/best", "--extract-audio")
+	case isAudioFormat(formatLower):
 		args = append(args, "--extract-audio", "--audio-format", formatLower)
 		qLower := strings.ToLower(cfg.Quality)
 		if formatLower != "flac" && formatLower != "wav" {
@@ -196,15 +255,15 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 				args = append(args, "--audio-quality", kbps+"K")
 			}
 		}
-	} else {
-		// Video
+	default:
+		// Standard video with format conversion
 		formatStr := buildVideoFormatString(formatLower, cfg.Quality)
 		args = append(args, "-f", formatStr, "--merge-output-format", formatLower)
 	}
 
 	// Metadata
 	args = append(args, "--embed-metadata")
-	if formatLower != "wav" {
+	if formatLower != "wav" && !isOriginalVideo && !isOriginalAudio {
 		args = append(args, "--embed-thumbnail")
 	}
 
