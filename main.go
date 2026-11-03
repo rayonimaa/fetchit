@@ -884,7 +884,7 @@ func interactiveWizard(cfg *Config) error {
 	}
 	cfg.OutputDir = dirChoice
 
-	urlChoice, err := runWizardText("Media URL (YouTube / Spotify)", "")
+	urlChoice, err := runWizardText("Paste the link (youtube/spotify)", "")
 	if err != nil {
 		return err
 	}

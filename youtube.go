@@ -72,6 +72,11 @@ func buildVideoFormatString(fmtStr, quality string) string {
 
 // checkIsPlaylist checks whether the specified URL points to a playlist with more than one item.
 func checkIsPlaylist(binDir, url string, verbose bool) bool {
+	lower := strings.ToLower(url)
+	if !strings.Contains(lower, "list=") && !strings.Contains(lower, "/playlist") && !strings.Contains(lower, "/album") && !strings.Contains(lower, "/sets/") {
+		return false
+	}
+
 	ytDlp := filepath.Join(binDir, ytDlpBinaryName())
 	cmd := exec.Command(ytDlp, "--flat-playlist", "--skip-download", "--print", "%(playlist_count)s", url)
 	out, err := cmd.Output()
