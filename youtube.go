@@ -149,53 +149,68 @@ func resolveMedia(binDir, url string, debug bool) (*ResolveInfo, error) {
 // buildYtdlpOutputTemplate constructs a yt-dlp -o template string that
 // honours the user's NamingOpts (artist / album / title / numbering).
 //
-// To avoid " -  - " when optional fields are absent, we build the name by
-// conditionally including only non-empty yt-dlp field expressions using the
-// "field|" fallback (empty string when absent) and then pass
-// --replace-in-metadata to collapse any double-separator artefacts.
-//
-// The caller should also append the extra args returned by
-// buildYtdlpNamingArgs to the yt-dlp command.
+// Uses yt-dlp conditional field formatting %(field&PREFIX%sSUFFIX|)s together with
+// --output-na-placeholder "" so that absent metadata fields omit their separators cleanly
+// and never leave trailing/leading/double " - " artifacts.
 func buildYtdlpOutputTemplate(opts RenameOptions, isPL bool, outDir string) string {
-	name := buildYtdlpNameSegment(opts, isPL)
-	name += ".%(ext)s"
+	var b strings.Builder
+	if isPL && opts.IncludeNumbering {
+		b.WriteString("%(playlist_index&%02d - |)s")
+	}
+	if opts.IncludeArtist {
+		b.WriteString("%(uploader,channel)s%(uploader,channel& - |)s")
+	}
+	if opts.IncludeAlbum {
+		b.WriteString("%(album)s%(album& - |)s")
+	}
+	if opts.IncludeTitle || (!opts.IncludeArtist && !opts.IncludeAlbum) {
+		b.WriteString("%(title)s")
+	}
+	b.WriteString(".%(ext)s")
+
+	name := b.String()
 	if isPL {
 		return filepath.Join(outDir, "%(playlist_title|Playlist)s", name)
 	}
 	return filepath.Join(outDir, name)
 }
 
-// buildYtdlpNameSegment returns just the filename-stem template (no ext, no dir).
-func buildYtdlpNameSegment(opts RenameOptions, isPL bool) string {
-	var parts []string
-	if isPL && opts.IncludeNumbering {
-		parts = append(parts, "%(playlist_index)s")
+// cleanupIntermediateFiles removes any leftover intermediate/pre-converted media files
+// (e.g. .part, temporary webm/mp4 from audio extraction, unmerged streams)
+// associated with the downloaded file.
+func cleanupIntermediateFiles(finalPath string) {
+	if finalPath == "" {
+		return
 	}
-	if opts.IncludeArtist {
-		// uploader,channel|  — falls back to channel, then empty string
-		parts = append(parts, "%(uploader,channel|)s")
-	}
-	if opts.IncludeAlbum {
-		parts = append(parts, "%(album|)s")
-	}
-	// Always include title unless explicitly deselected AND at least one other field is on
-	if opts.IncludeTitle || (!opts.IncludeArtist && !opts.IncludeAlbum) {
-		parts = append(parts, "%(title)s")
-	}
-	if len(parts) == 0 {
-		return "%(title)s"
-	}
-	return strings.Join(parts, " - ")
-}
+	dir := filepath.Dir(finalPath)
+	base := filepath.Base(finalPath)
+	ext := filepath.Ext(finalPath)
+	stem := strings.TrimSuffix(base, ext)
 
-// buildYtdlpNamingArgs returns extra yt-dlp args that clean up empty
-// " - " separator segments produced when optional metadata fields are absent.
-// Pass these in addition to the -o template.
-func buildYtdlpNamingArgs() []string {
-	// Collapse "X -  - Y" → "X - Y" and strip leading/trailing " - "
-	return []string{
-		"--replace-in-metadata", "title", `( - ){2,}`, " - ",
-		"--replace-in-metadata", "title", `^ - | - $`, "",
+	// 1. Clean up .part / .ytdl appended to the full filename (e.g. "Song.mp3.part")
+	for _, suffix := range []string{".part", ".ytdl"} {
+		partCandidate := filepath.Join(dir, base+suffix)
+		if fi, err := os.Stat(partCandidate); err == nil && !fi.IsDir() {
+			_ = os.Remove(partCandidate)
+		}
+	}
+
+	// 2. Clean up intermediate formats sharing the same stem (e.g. "Song.webm", "Song.part")
+	intermediateExts := []string{
+		".part", ".ytdl",
+		".webm", ".mp4", ".m4a", ".opus", ".ogg",
+		".temp.mp4", ".temp.webm", ".temp.m4a",
+		".jpg", ".webp", ".png",
+	}
+
+	for _, ie := range intermediateExts {
+		if strings.EqualFold(ext, ie) {
+			continue // Do not delete the target file itself
+		}
+		candidate := filepath.Join(dir, stem+ie)
+		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+			_ = os.Remove(candidate)
+		}
 	}
 }
 
@@ -221,11 +236,12 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 	args := []string{
 		"--newline",
 		"--ffmpeg-location", binDir,
+		"--output-na-placeholder", "",
+		"--no-keep-video",
+		"--no-write-thumbnail",
 		"-o", outputTemplate,
 		"--print-to-file", "after_move:filepath", tmpFilePath,
 	}
-	// Clean up empty " - " segments from optional metadata fields
-	args = append(args, buildYtdlpNamingArgs()...)
 
 	if isPL {
 		args = append(args, "--yes-playlist")
@@ -404,11 +420,14 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 	var savedFiles []string
 	if data, err := os.ReadFile(tmpFilePath); err == nil {
 		lines := strings.Split(string(data), "\n")
+		seen := make(map[string]bool)
 		for _, l := range lines {
 			l = strings.TrimSpace(l)
-			if l != "" {
+			if l != "" && !seen[l] {
 				if _, err := os.Stat(l); err == nil {
 					savedFiles = append(savedFiles, l)
+					seen[l] = true
+					cleanupIntermediateFiles(l)
 				}
 			}
 		}

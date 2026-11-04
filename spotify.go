@@ -523,6 +523,9 @@ func downloadSpotifyTrack(cfg *Config, binDir string, track SpotifyTrack, trackN
 	args := []string{
 		"--newline",
 		"--ffmpeg-location", binDir,
+		"--output-na-placeholder", "",
+		"--no-keep-video",
+		"--no-write-thumbnail",
 		"-o", outputTemplate,
 		"--print-to-file", "after_move:filepath", tmpFilePath,
 		"--no-playlist",
@@ -676,11 +679,14 @@ func downloadSpotifyTrack(cfg *Config, binDir string, track SpotifyTrack, trackN
 	var savedFiles []string
 	if data, err := os.ReadFile(tmpFilePath); err == nil {
 		lines := strings.Split(string(data), "\n")
+		seen := make(map[string]bool)
 		for _, l := range lines {
 			l = strings.TrimSpace(l)
-			if l != "" {
+			if l != "" && !seen[l] {
 				if _, err := os.Stat(l); err == nil {
 					savedFiles = append(savedFiles, l)
+					seen[l] = true
+					cleanupIntermediateFiles(l)
 				}
 			}
 		}

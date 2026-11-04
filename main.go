@@ -156,7 +156,7 @@ func printHeader(outDir string) {
 	w := 54
 	title := ">_ fetchit"
 	line1 := "v1.0 stable"
-	line2 := "customized engine:   yt-dlp, ffmpeg, spotify"
+	line2 := "customized engine:   yt-dlp, ffmpeg, spotify, qobuz"
 
 	maxInner := w - 4 // border takes 2 chars on each side + 1 space each: "│ " ... " │"
 	if stringWidth(line2) > maxInner {
@@ -348,6 +348,9 @@ type Config struct {
 	URLs              []string
 	NamingOpts        RenameOptions
 	ExplicitNumbering bool
+	Country           string
+	CFClearance       string
+	UserAgent         string
 }
 
 func getBinDir() (string, error) {
@@ -972,7 +975,7 @@ func interactiveWizard(cfg *Config) error {
 	fmt.Printf("\r\n")
 
 	// ── Step 1: URL ─────────────────────────────────────────────────────────
-	urlInput, err := runWizardText("Paste the link (YouTube / Spotify / etc.)", "")
+	urlInput, err := runWizardText("Paste the link (YouTube / Spotify / Qobuz)", "")
 	if err != nil {
 		return err
 	}
@@ -983,64 +986,81 @@ func interactiveWizard(cfg *Config) error {
 
 	fmt.Printf("\r\n")
 
-	// ── Step 2: Media type ───────────────────────────────────────────────────
-	mediaType, err := runCheckbox("Download type", []string{"video", "audio"}, 0)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("\r\n")
-
-	// ── Step 3: Format ───────────────────────────────────────────────────────
-	var fmtOptions []string
-	if mediaType == "video" {
-		fmtOptions = []string{"mp4", "mkv", "webm", "mov", "original"}
-	} else {
-		fmtOptions = []string{"mp3", "m4a", "opus", "flac", "wav", "aac", "original"}
-	}
-	fmtChoice, err := runCheckbox("Format", fmtOptions, 0)
-	if err != nil {
-		return err
-	}
-
-	// "original" means we skip format conversion
-	if fmtChoice == "original" {
-		if mediaType == "video" {
-			cfg.Format = "bestvideo+bestaudio/best"
-		} else {
-			cfg.Format = "bestaudio/best"
-		}
-	} else {
-		cfg.Format = fmtChoice
-	}
-
-	fmt.Printf("\r\n")
-
-	// ── Step 4: Quality ───────────────────────────────────────────────────────
-	var qualOptions []string
-	if mediaType == "video" {
-		qualOptions = []string{"best", "4k", "2k", "1080p", "720p", "480p", "360p", "original"}
-	} else {
-		if fmtChoice == "flac" || fmtChoice == "wav" || fmtChoice == "original" {
-			// lossless / original → no re-encoding quality choice
-			cfg.Quality = "best"
-			qualOptions = nil
-		} else {
-			qualOptions = []string{"best", "320k", "256k", "192k", "128k", "original"}
-		}
-	}
-
-	if qualOptions != nil {
-		qualChoice, err := runCheckbox("Quality", qualOptions, 0)
+	// If Qobuz URL is detected, it is audio-first (Hi-Res FLAC / MP3)
+	if isQobuzURL(urlInput) {
+		logSubKV("service", "Qobuz (Hi-Res via Lucida backend)")
+		fmtChoice, err := runCheckbox("Format", []string{"flac (Hi-Res 24-bit lossless)", "mp3 (320k)"}, 0)
 		if err != nil {
 			return err
 		}
-		if qualChoice == "original" {
+		if strings.HasPrefix(fmtChoice, "flac") {
+			cfg.Format = "flac"
 			cfg.Quality = "best"
 		} else {
-			cfg.Quality = strings.TrimSuffix(qualChoice, "p") // strip trailing 'p' for video labels
+			cfg.Format = "mp3"
+			cfg.Quality = "320k"
 		}
 		fmt.Printf("\r\n")
+	} else {
+		// ── Step 2: Media type ───────────────────────────────────────────────────
+		mediaType, err := runCheckbox("Download type", []string{"video", "audio"}, 0)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("\r\n")
+
+		// ── Step 3: Format ───────────────────────────────────────────────────────
+		var fmtOptions []string
+		if mediaType == "video" {
+			fmtOptions = []string{"mp4", "mkv", "webm", "mov", "original"}
+		} else {
+			fmtOptions = []string{"mp3", "m4a", "opus", "flac", "wav", "aac", "original"}
+		}
+		fmtChoice, err := runCheckbox("Format", fmtOptions, 0)
+		if err != nil {
+			return err
+		}
+
+		// "original" means we skip format conversion
+		if fmtChoice == "original" {
+			if mediaType == "video" {
+				cfg.Format = "bestvideo+bestaudio/best"
+			} else {
+				cfg.Format = "bestaudio/best"
+			}
+		} else {
+			cfg.Format = fmtChoice
+		}
+
+		fmt.Printf("\r\n")
+
+		// ── Step 4: Quality ───────────────────────────────────────────────────────
+		var qualOptions []string
+		if mediaType == "video" {
+			qualOptions = []string{"best", "4k", "2k", "1080p", "720p", "480p", "360p", "original"}
+		} else {
+			if fmtChoice == "flac" || fmtChoice == "wav" || fmtChoice == "original" {
+				// lossless / original → no re-encoding quality choice
+				cfg.Quality = "best"
+				qualOptions = nil
+			} else {
+				qualOptions = []string{"best", "320k", "256k", "192k", "128k", "original"}
+			}
+		}
+
+		if qualOptions != nil {
+			qualChoice, err := runCheckbox("Quality", qualOptions, 0)
+			if err != nil {
+				return err
+			}
+			if qualChoice == "original" {
+				cfg.Quality = "best"
+			} else {
+				cfg.Quality = strings.TrimSuffix(qualChoice, "p") // strip trailing 'p' for video labels
+			}
+			fmt.Printf("\r\n")
+		}
 	}
 
 	// ── Step 5: Filename options (multi-checkbox) ────────────────────────────
@@ -1100,7 +1120,7 @@ Options:
   -h, --help             print help with the codex box header
   --version              print "fetchit 1.0"
 
-No URLs → interactive wizard (arrow-key menus).`)
+no args will routed to interactive wizard.`)
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,6 +1158,9 @@ func main() {
 	fs.StringVar(&cfg.Quality, "quality", cfg.Quality, "")
 	fs.StringVar(&cfg.OutputDir, "o", cfg.OutputDir, "")
 	fs.StringVar(&cfg.OutputDir, "output", cfg.OutputDir, "")
+	fs.StringVar(&cfg.Country, "country", "auto", "")
+	fs.StringVar(&cfg.CFClearance, "cf-clearance", "", "")
+	fs.StringVar(&cfg.UserAgent, "user-agent", "", "")
 	fs.BoolVar(&cfg.Verbose, "V", false, "")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "")
 	fs.BoolVar(&cfg.Debug, "debug", false, "")
@@ -1241,6 +1264,32 @@ func main() {
 	var allSavedFiles []string
 	failedCount := 0
 
+	// Pre-check Lucida availability once if any URL is a Qobuz link
+	lucidaChecked := false
+	lucidaCFBlocked := false
+	for _, u := range cfg.URLs {
+		if isQobuzURL(u) && !lucidaChecked {
+			lucidaChecked = true
+			lucidaClient := newLucidaHTTPClient(cfg)
+			if err := checkLucidaAvailability(lucidaClient, cfg); err != nil {
+				var cfErr lucidaCFError
+				if errors.As(err, &cfErr) {
+					lucidaCFBlocked = true
+					logErr("lucida.to is blocked by Cloudflare — Qobuz downloads are unavailable.")
+					if cfg.Verbose {
+						logSub("Pass --cf-clearance <token> and --user-agent <ua> to bypass the captcha wall.")
+						logSub("Get cf_clearance from your browser's DevTools → Application → Cookies → lucida.to")
+					} else {
+						logSub("")
+					}
+				} else if cfg.Verbose {
+					logWarn(fmt.Sprintf("lucida.to connectivity check: %v — will try anyway", err))
+				}
+			}
+			break
+		}
+	}
+
 	for idx, url := range cfg.URLs {
 		if isSpotifyURL(url) {
 			logPhase(fmt.Sprintf("[%d/%d] Spotify: %s", idx+1, len(cfg.URLs), url))
@@ -1252,11 +1301,30 @@ func main() {
 			continue
 		}
 
+		if isQobuzURL(url) {
+			logPhase(fmt.Sprintf("[%d/%d] Qobuz: %s", idx+1, len(cfg.URLs), url))
+			if lucidaCFBlocked {
+				logErr("skipped — lucida.to failed")
+				failedCount++
+				continue
+			}
+			saved, qbErr := runQobuzDownload(cfg, binDir, url)
+			if qbErr != nil {
+				failedCount++
+			}
+			allSavedFiles = append(allSavedFiles, saved...)
+			continue
+		}
+
 		logPhase(fmt.Sprintf("[%d/%d] Resolving %s", idx+1, len(cfg.URLs), url))
 
 		info, err := resolveMedia(binDir, url, cfg.Debug)
 		if err != nil {
-			logWarn(fmt.Sprintf("could not resolve %s: %v", url, err))
+			if cfg.Verbose {
+				logWarn(fmt.Sprintf("could not resolve: %v", err))
+			} else {
+				logWarn("could not resolve — skipping")
+			}
 			failedCount++
 			continue
 		}
