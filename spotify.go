@@ -502,7 +502,14 @@ func downloadSpotifyTrack(cfg *Config, binDir string, track SpotifyTrack, trackN
 	if totalTracks <= 1 && !cfg.ExplicitNumbering {
 		opts.IncludeNumbering = false
 	}
-	outputFilename := generateFilename(meta, opts)
+	outputFilename, namerErr := generateFilename(meta, opts)
+	if namerErr != nil {
+		if cfg.Verbose {
+			logWarn(fmt.Sprintf("custom namer: %v — failsafe filename applied: %s", namerErr, outputFilename))
+		} else {
+			logWarn(fmt.Sprintf("namer: no input, using failsafe %s", outputFilename))
+		}
+	}
 	outputTemplate := filepath.Join(outDir, outputFilename)
 
 	// Build a temp file to capture the final path

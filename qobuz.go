@@ -617,13 +617,16 @@ func runQobuzDownload(cfg *Config, binDir, qobuzURL string) ([]string, error) {
 	}
 	_ = os.MkdirAll(outDir, 0755)
 
+	var savedFiles []string
+
 	// Download cover art if available
 	coverFilePath := filepath.Join(outDir, "cover.jpg")
 	if coverURL != "" {
-		_ = downloadQobuzCoverArt(client, cfg, coverURL, coverFilePath)
+		if err := downloadQobuzCoverArt(client, cfg, coverURL, coverFilePath); err == nil {
+			savedFiles = append(savedFiles, coverFilePath)
+		}
 	}
 
-	var savedFiles []string
 	var failCount int
 	var spinnerIdx int32
 
@@ -658,7 +661,14 @@ func runQobuzDownload(cfg *Config, binDir, qobuzURL string) ([]string, error) {
 		if !isMultiTrack && !cfg.ExplicitNumbering {
 			namingOpts.IncludeNumbering = false
 		}
-		finalFilename := generateFilename(meta, namingOpts)
+		finalFilename, namerErr := generateFilename(meta, namingOpts)
+		if namerErr != nil {
+			if cfg.Verbose {
+				logWarn(fmt.Sprintf("custom namer: %v — failsafe filename applied: %s", namerErr, finalFilename))
+			} else {
+				logWarn(fmt.Sprintf("namer: no input, using failsafe %s", finalFilename))
+			}
+		}
 		destPath := filepath.Join(outDir, finalFilename)
 
 		if cfg.DryRun {

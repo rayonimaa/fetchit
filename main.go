@@ -156,7 +156,7 @@ func printHeader(outDir string) {
 	w := 54
 	title := ">_ fetchit"
 	line1 := "v1.0 stable"
-	line2 := "customized engine:   yt-dlp, ffmpeg, spotify, qobuz"
+	line2 := "customized backend-engine"
 
 	maxInner := w - 4 // border takes 2 chars on each side + 1 space each: "│ " ... " │"
 	if stringWidth(line2) > maxInner {
@@ -276,13 +276,21 @@ func sanitizeBaseName(name string) string {
 	return clean
 }
 
-// generateFilename akan merakit nama file secara dinamis sesuai konfigurasi
-func generateFilename(meta FileMeta, opts RenameOptions) string {
-	var parts []string
+var (
+	// ErrNoNamerInput indicates that FileMeta contained no usable title, artist, or album.
+	ErrNoNamerInput = errors.New("custom namer received no metadata input")
+	// ErrNoNamingFields indicates that all naming field options (artist, album, title) were false.
+	ErrNoNamingFields = errors.New("custom namer received no active naming fields")
+)
 
-	// Fallback pengamanan jika kamu ceroboh dan tidak mencentang apa pun
+// generateFilename akan merakit nama file secara dinamis sesuai konfigurasi
+func generateFilename(meta FileMeta, opts RenameOptions) (string, error) {
+	var namerErr error
+
+	// Fallback pengamanan jika tidak mencentang apa pun
 	if !opts.IncludeTitle && !opts.IncludeArtist && !opts.IncludeAlbum {
 		opts.IncludeTitle = true
+		namerErr = ErrNoNamingFields
 	}
 
 	// Rapikan setiap input metadata
@@ -290,6 +298,7 @@ func generateFilename(meta FileMeta, opts RenameOptions) string {
 	album := strings.TrimSpace(meta.Album)
 	title := strings.TrimSpace(meta.Title)
 
+	var parts []string
 	// Urutan: Artist - Album - Title
 	if opts.IncludeArtist && artist != "" {
 		parts = append(parts, artist)
@@ -303,6 +312,7 @@ func generateFilename(meta FileMeta, opts RenameOptions) string {
 
 	var baseName string
 	if len(parts) == 0 {
+		namerErr = ErrNoNamerInput
 		if meta.TrackNumber > 0 {
 			baseName = fmt.Sprintf("Track %d", meta.TrackNumber)
 		} else {
@@ -328,7 +338,82 @@ func generateFilename(meta FileMeta, opts RenameOptions) string {
 		ext = "." + ext
 	}
 
-	return baseName + ext
+	return baseName + ext, namerErr
+}
+
+// resolvePath normalizes, unquotes, expands env vars and ~, and returns an absolute clean path.
+func resolvePath(p string) string {
+	clean := strings.TrimSpace(p)
+	clean = strings.Trim(clean, "\"'")
+	if clean == "" {
+		return ""
+	}
+	clean = os.ExpandEnv(clean)
+
+	if clean == "~" || strings.HasPrefix(clean, "~/") || strings.HasPrefix(clean, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if clean == "~" {
+				clean = home
+			} else {
+				clean = filepath.Join(home, clean[2:])
+			}
+		}
+	}
+
+	if abs, err := filepath.Abs(clean); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(clean)
+}
+
+// moveFile moves a file from src to dest. It attempts os.Rename first, and falls back to
+// copy+remove if crossing filesystem or drive volume boundaries (common on Windows).
+func moveFile(src, dest string) error {
+	if err := os.Rename(src, dest); err == nil {
+		return nil
+	}
+
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	destFile, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(destFile, srcFile); err != nil {
+		destFile.Close()
+		_ = os.Remove(dest)
+		return err
+	}
+
+	if err := destFile.Sync(); err != nil {
+		destFile.Close()
+		_ = os.Remove(dest)
+		return err
+	}
+
+	if err := destFile.Close(); err != nil {
+		_ = os.Remove(dest)
+		return err
+	}
+
+	// Windows requires closing srcFile before deleting it
+	srcFile.Close()
+
+	if err := os.Remove(src); err != nil {
+		return fmt.Errorf("copied to %s but failed to remove original %s: %w", dest, src, err)
+	}
+
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1083,6 +1168,11 @@ func interactiveWizard(cfg *Config) error {
 	// Guard: at least title must be on
 	if !cfg.NamingOpts.IncludeTitle && !cfg.NamingOpts.IncludeArtist && !cfg.NamingOpts.IncludeAlbum {
 		cfg.NamingOpts.IncludeTitle = true
+		if cfg.Verbose {
+			logWarn("custom namer received no active fields — failsafe fallback triggered: forced IncludeTitle=true")
+		} else {
+			logWarn("no fields selected — failsafe: defaulting to title")
+		}
 	}
 
 	fmt.Printf("\r\n")
@@ -1216,6 +1306,15 @@ func main() {
 	} else if numberingFlag {
 		cfg.NamingOpts.IncludeNumbering = true
 		cfg.ExplicitNumbering = true
+	}
+
+	if !cfg.NamingOpts.IncludeTitle && !cfg.NamingOpts.IncludeArtist && !cfg.NamingOpts.IncludeAlbum {
+		cfg.NamingOpts.IncludeTitle = true
+		if cfg.Verbose {
+			logWarn("custom namer: no fields enabled, failsafe forced title")
+		} else {
+			logWarn("custom namer: failsafe enabled (title)")
+		}
 	}
 
 	if cfg.Debug {
@@ -1365,26 +1464,99 @@ func main() {
 
 	// Post-download relocation prompt
 	if !cfg.AssumeYes && isTerminalStdin && len(allSavedFiles) > 0 {
-		fmt.Printf("Save to [%s]: ", cfg.OutputDir)
+		cleanOutputDir := resolvePath(cfg.OutputDir)
+		fmt.Printf("Save to [%s]: ", cleanOutputDir)
 		reader := bufio.NewReader(os.Stdin)
-		newDir, _ := reader.ReadString('\n')
-		newDir = strings.TrimSpace(newDir)
+		newDirInput, _ := reader.ReadString('\n')
+		newDirInput = strings.TrimSpace(newDirInput)
 
-		if newDir != "" && filepath.Clean(newDir) != filepath.Clean(cfg.OutputDir) {
-			_ = os.MkdirAll(newDir, 0755)
-			movedCount := 0
-			for _, src := range allSavedFiles {
-				rel, err := filepath.Rel(cfg.OutputDir, src)
-				if err != nil {
-					rel = filepath.Base(src)
-				}
-				dest := filepath.Join(newDir, rel)
-				_ = os.MkdirAll(filepath.Dir(dest), 0755)
-				if err := os.Rename(src, dest); err == nil {
-					movedCount++
+		if newDirInput != "" {
+			targetDir := resolvePath(newDirInput)
+			if targetDir != "" && targetDir != cleanOutputDir {
+				if err := os.MkdirAll(targetDir, 0755); err != nil {
+					if cfg.Verbose {
+						logErr(fmt.Sprintf("failed to create destination directory [%s]: %v", targetDir, err))
+					} else {
+						logErr(fmt.Sprintf("cannot create destination directory: %s", targetDir))
+					}
+				} else {
+					if cfg.Verbose {
+						logSubKV("dest-dir", targetDir)
+					}
+
+					movedCount := 0
+					failCount := 0
+					dirsToCheck := make(map[string]bool)
+
+					for _, src := range allSavedFiles {
+						cleanSrc := resolvePath(src)
+						if _, err := os.Stat(cleanSrc); err != nil {
+							if cfg.Verbose {
+								logWarn(fmt.Sprintf("skip missing source file: %s", cleanSrc))
+							}
+							continue
+						}
+
+						rel, err := filepath.Rel(cleanOutputDir, cleanSrc)
+						if err != nil || strings.HasPrefix(rel, "..") {
+							rel = filepath.Base(cleanSrc)
+						}
+
+						dest := filepath.Join(targetDir, rel)
+						destDir := filepath.Dir(dest)
+						if err := os.MkdirAll(destDir, 0755); err != nil {
+							failCount++
+							if cfg.Verbose {
+								logErr(fmt.Sprintf("failed to create target folder %s: %v", destDir, err))
+							}
+							continue
+						}
+
+						if cfg.Verbose {
+							logSub(fmt.Sprintf("moving %s → %s", filepath.Base(cleanSrc), dest))
+						}
+
+						if err := moveFile(cleanSrc, dest); err != nil {
+							failCount++
+							if cfg.Verbose {
+								logErr(fmt.Sprintf("failed to move %s: %v", filepath.Base(cleanSrc), err))
+							}
+						} else {
+							movedCount++
+							srcParent := filepath.Dir(cleanSrc)
+							if srcParent != cleanOutputDir {
+								dirsToCheck[srcParent] = true
+							}
+						}
+					}
+
+					// Clean up empty source subdirectories
+					for dir := range dirsToCheck {
+						if entries, err := os.ReadDir(dir); err == nil && len(entries) == 0 {
+							_ = os.Remove(dir)
+							if cfg.Verbose {
+								logSubKV("cleaned", dir)
+							}
+						}
+					}
+
+					if failCount == 0 && movedCount > 0 {
+						logOK(fmt.Sprintf("moved %d file(s) → %s", movedCount, targetDir))
+					} else if movedCount > 0 && failCount > 0 {
+						if cfg.Verbose {
+							logWarn(fmt.Sprintf("relocation partially completed: %d moved, %d failed", movedCount, failCount))
+						} else {
+							logWarn(fmt.Sprintf("moved %d file(s) → %s (%d failed)", movedCount, targetDir, failCount))
+						}
+					} else if movedCount == 0 && failCount > 0 {
+						if cfg.Verbose {
+							logErr(fmt.Sprintf("relocation failed: 0 of %d file(s) moved to %s", len(allSavedFiles), targetDir))
+						} else {
+							logErr(fmt.Sprintf("failed to move files to %s", targetDir))
+						}
+					}
 				}
 			}
-			logOK(fmt.Sprintf("moved %d files → %s", movedCount, newDir))
 		}
 
 		fmt.Print("\nPress Enter to exit…")
