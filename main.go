@@ -153,10 +153,10 @@ func printHeader(outDir string) {
 		}
 	}
 
-	w := 54
+	w := 56
 	title := ">_ fetchit"
 	line1 := "v1.0 stable"
-	line2 := "customized engine:   yt-dlp, ffmpeg, spotify"
+	line2 := "customized engine:   yt-dlp, ffmpeg, spotify, tidal"
 
 	maxInner := w - 4 // border takes 2 chars on each side + 1 space each: "│ " ... " │"
 	if stringWidth(line2) > maxInner {
@@ -348,6 +348,9 @@ type Config struct {
 	URLs              []string
 	NamingOpts        RenameOptions
 	ExplicitNumbering bool
+	Country           string
+	CFClearance       string
+	UserAgent         string
 }
 
 func getBinDir() (string, error) {
@@ -884,7 +887,7 @@ func interactiveWizard(cfg *Config) error {
 	}
 	cfg.OutputDir = dirChoice
 
-	urlChoice, err := runWizardText("Media URL (YouTube / Spotify)", "")
+	urlChoice, err := runWizardText("Media URL (YouTube / Spotify / Tidal)", "")
 	if err != nil {
 		return err
 	}
@@ -911,6 +914,9 @@ Options:
                          audio: best 320 256 192 128 (kbps)
                          (default: best)
   -o, --output <dir>     initial save directory (default: $HOME/Downloads)
+  --country <code>       service/proxy country code (e.g. us, gb, auto)
+  --cf-clearance <tok>   Cloudflare clearance cookie for Lucida proxy
+  --user-agent <ua>      custom User-Agent string
   -V, --verbose          show full yt-dlp log stream (no progress bar)
   --debug                implies --verbose, plus stderr dumps on resolve fail
   --bootstrap            delete cache + re-download yt-dlp and ffmpeg
@@ -963,6 +969,9 @@ func main() {
 	fs.StringVar(&cfg.Quality, "quality", cfg.Quality, "")
 	fs.StringVar(&cfg.OutputDir, "o", cfg.OutputDir, "")
 	fs.StringVar(&cfg.OutputDir, "output", cfg.OutputDir, "")
+	fs.StringVar(&cfg.Country, "country", "auto", "")
+	fs.StringVar(&cfg.CFClearance, "cf-clearance", "", "")
+	fs.StringVar(&cfg.UserAgent, "user-agent", "", "")
 	fs.BoolVar(&cfg.Verbose, "V", false, "")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "")
 	fs.BoolVar(&cfg.Debug, "debug", false, "")
@@ -1071,6 +1080,16 @@ func main() {
 			logPhase(fmt.Sprintf("[%d/%d] Spotify: %s", idx+1, len(cfg.URLs), url))
 			saved, spErr := runSpotifyDownload(cfg, binDir, url)
 			if spErr != nil {
+				failedCount++
+			}
+			allSavedFiles = append(allSavedFiles, saved...)
+			continue
+		}
+
+		if isTidalURL(url) {
+			logPhase(fmt.Sprintf("[%d/%d] Tidal: %s", idx+1, len(cfg.URLs), url))
+			saved, tdErr := runTidalDownload(cfg, binDir, url)
+			if tdErr != nil {
 				failedCount++
 			}
 			allSavedFiles = append(allSavedFiles, saved...)
