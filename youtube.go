@@ -72,6 +72,11 @@ func buildVideoFormatString(fmtStr, quality string) string {
 
 // checkIsPlaylist checks whether the specified URL points to a playlist with more than one item.
 func checkIsPlaylist(binDir, url string, verbose bool) bool {
+	lower := strings.ToLower(url)
+	if !strings.Contains(lower, "list=") && !strings.Contains(lower, "/playlist") && !strings.Contains(lower, "/album") && !strings.Contains(lower, "/sets/") {
+		return false
+	}
+
 	ytDlp := filepath.Join(binDir, ytDlpBinaryName())
 	cmd := exec.Command(ytDlp, "--flat-playlist", "--skip-download", "--print", "%(playlist_count)s", url)
 	out, err := cmd.Output()
@@ -141,6 +146,74 @@ func resolveMedia(binDir, url string, debug bool) (*ResolveInfo, error) {
 	return info, nil
 }
 
+// buildYtdlpOutputTemplate constructs a yt-dlp -o template string that
+// honours the user's NamingOpts (artist / album / title / numbering).
+//
+// Uses yt-dlp conditional field formatting %(field&PREFIX%sSUFFIX|)s together with
+// --output-na-placeholder "" so that absent metadata fields omit their separators cleanly
+// and never leave trailing/leading/double " - " artifacts.
+func buildYtdlpOutputTemplate(opts RenameOptions, isPL bool, outDir string) string {
+	var b strings.Builder
+	if isPL && opts.IncludeNumbering {
+		b.WriteString("%(playlist_index&%02d - |)s")
+	}
+	if opts.IncludeArtist {
+		b.WriteString("%(uploader,channel)s%(uploader,channel& - |)s")
+	}
+	if opts.IncludeAlbum {
+		b.WriteString("%(album)s%(album& - |)s")
+	}
+	if opts.IncludeTitle || (!opts.IncludeArtist && !opts.IncludeAlbum) {
+		b.WriteString("%(title)s")
+	}
+	b.WriteString(".%(ext)s")
+
+	name := b.String()
+	if isPL {
+		return filepath.Join(outDir, "%(playlist_title|Playlist)s", name)
+	}
+	return filepath.Join(outDir, name)
+}
+
+// cleanupIntermediateFiles removes any leftover intermediate/pre-converted media files
+// (e.g. .part, temporary webm/mp4 from audio extraction, unmerged streams)
+// associated with the downloaded file.
+func cleanupIntermediateFiles(finalPath string) {
+	if finalPath == "" {
+		return
+	}
+	dir := filepath.Dir(finalPath)
+	base := filepath.Base(finalPath)
+	ext := filepath.Ext(finalPath)
+	stem := strings.TrimSuffix(base, ext)
+
+	// 1. Clean up .part / .ytdl appended to the full filename (e.g. "Song.mp3.part")
+	for _, suffix := range []string{".part", ".ytdl"} {
+		partCandidate := filepath.Join(dir, base+suffix)
+		if fi, err := os.Stat(partCandidate); err == nil && !fi.IsDir() {
+			_ = os.Remove(partCandidate)
+		}
+	}
+
+	// 2. Clean up intermediate formats sharing the same stem (e.g. "Song.webm", "Song.part")
+	intermediateExts := []string{
+		".part", ".ytdl",
+		".webm", ".mp4", ".m4a", ".opus", ".ogg",
+		".temp.mp4", ".temp.webm", ".temp.m4a",
+		".jpg", ".webp", ".png",
+	}
+
+	for _, ie := range intermediateExts {
+		if strings.EqualFold(ext, ie) {
+			continue // Do not delete the target file itself
+		}
+		candidate := filepath.Join(dir, stem+ie)
+		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+			_ = os.Remove(candidate)
+		}
+	}
+}
+
 // runDownload downloads media from a YouTube or generic yt-dlp supported URL.
 func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 	ytDlp := filepath.Join(binDir, ytDlpBinaryName())
@@ -155,20 +228,17 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 	tmpFileList.Close()
 	defer os.Remove(tmpFilePath)
 
-	var outputTemplate string
-	if isPL {
-		if !cfg.NamingOpts.IncludeNumbering && cfg.ExplicitNumbering {
-			outputTemplate = filepath.Join(cfg.OutputDir, "%(playlist_title|Playlist)s", "%(title)s.%(ext)s")
-		} else {
-			outputTemplate = filepath.Join(cfg.OutputDir, "%(playlist_title|Playlist)s", "%(playlist_index)s - %(title)s.%(ext)s")
-		}
-	} else {
-		outputTemplate = filepath.Join(cfg.OutputDir, "%(title)s.%(ext)s")
-	}
+	// Respect user's NamingOpts for the output template
+	namingOpts := cfg.NamingOpts
+	namingOpts.IsPlaylist = isPL
+	outputTemplate := buildYtdlpOutputTemplate(namingOpts, isPL, cfg.OutputDir)
 
 	args := []string{
 		"--newline",
 		"--ffmpeg-location", binDir,
+		"--output-na-placeholder", "",
+		"--no-keep-video",
+		"--no-write-thumbnail",
 		"-o", outputTemplate,
 		"--print-to-file", "after_move:filepath", tmpFilePath,
 	}
@@ -180,7 +250,17 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 	}
 
 	formatLower := strings.ToLower(cfg.Format)
-	if isAudioFormat(formatLower) {
+
+	// "original" format: pass raw yt-dlp selector strings set by the wizard, no conversion.
+	isOriginalVideo := formatLower == "bestvideo+bestaudio/best"
+	isOriginalAudio := formatLower == "bestaudio/best"
+
+	switch {
+	case isOriginalVideo:
+		args = append(args, "-f", "bestvideo+bestaudio/best")
+	case isOriginalAudio:
+		args = append(args, "-f", "bestaudio/best", "--extract-audio")
+	case isAudioFormat(formatLower):
 		args = append(args, "--extract-audio", "--audio-format", formatLower)
 		qLower := strings.ToLower(cfg.Quality)
 		if formatLower != "flac" && formatLower != "wav" {
@@ -191,15 +271,15 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 				args = append(args, "--audio-quality", kbps+"K")
 			}
 		}
-	} else {
-		// Video
+	default:
+		// Standard video with format conversion
 		formatStr := buildVideoFormatString(formatLower, cfg.Quality)
 		args = append(args, "-f", formatStr, "--merge-output-format", formatLower)
 	}
 
 	// Metadata
 	args = append(args, "--embed-metadata")
-	if formatLower != "wav" {
+	if formatLower != "wav" && !isOriginalVideo && !isOriginalAudio {
 		args = append(args, "--embed-thumbnail")
 	}
 
@@ -340,11 +420,14 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 	var savedFiles []string
 	if data, err := os.ReadFile(tmpFilePath); err == nil {
 		lines := strings.Split(string(data), "\n")
+		seen := make(map[string]bool)
 		for _, l := range lines {
 			l = strings.TrimSpace(l)
-			if l != "" {
+			if l != "" && !seen[l] {
 				if _, err := os.Stat(l); err == nil {
 					savedFiles = append(savedFiles, l)
+					seen[l] = true
+					cleanupIntermediateFiles(l)
 				}
 			}
 		}

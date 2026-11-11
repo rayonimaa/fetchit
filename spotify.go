@@ -502,7 +502,14 @@ func downloadSpotifyTrack(cfg *Config, binDir string, track SpotifyTrack, trackN
 	if totalTracks <= 1 && !cfg.ExplicitNumbering {
 		opts.IncludeNumbering = false
 	}
-	outputFilename := generateFilename(meta, opts)
+	outputFilename, namerErr := generateFilename(meta, opts)
+	if namerErr != nil {
+		if cfg.Verbose {
+			logWarn(fmt.Sprintf("custom namer: %v — failsafe filename applied: %s", namerErr, outputFilename))
+		} else {
+			logWarn(fmt.Sprintf("namer: no input, using failsafe %s", outputFilename))
+		}
+	}
 	outputTemplate := filepath.Join(outDir, outputFilename)
 
 	// Build a temp file to capture the final path
@@ -523,6 +530,9 @@ func downloadSpotifyTrack(cfg *Config, binDir string, track SpotifyTrack, trackN
 	args := []string{
 		"--newline",
 		"--ffmpeg-location", binDir,
+		"--output-na-placeholder", "",
+		"--no-keep-video",
+		"--no-write-thumbnail",
 		"-o", outputTemplate,
 		"--print-to-file", "after_move:filepath", tmpFilePath,
 		"--no-playlist",
@@ -676,11 +686,14 @@ func downloadSpotifyTrack(cfg *Config, binDir string, track SpotifyTrack, trackN
 	var savedFiles []string
 	if data, err := os.ReadFile(tmpFilePath); err == nil {
 		lines := strings.Split(string(data), "\n")
+		seen := make(map[string]bool)
 		for _, l := range lines {
 			l = strings.TrimSpace(l)
-			if l != "" {
+			if l != "" && !seen[l] {
 				if _, err := os.Stat(l); err == nil {
 					savedFiles = append(savedFiles, l)
+					seen[l] = true
+					cleanupIntermediateFiles(l)
 				}
 			}
 		}
