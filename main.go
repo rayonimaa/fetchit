@@ -155,10 +155,10 @@ func printHeader(outDir string) {
 
 	w := 56
 	title := ">_ fetchit"
-	line1 := "v1.0 stable"
-	line2 := "customized backned-engine"
+	line1 := "v1.3 stable"
+	line2 := "custom backend-engine"
 
-	maxInner := w - 4 // border takes 2 chars on each side + 1 space each: "│ " ... " │"
+	maxInner := w - 4
 	if stringWidth(line2) > maxInner {
 		line2 = truncateString(line2, maxInner)
 	}
@@ -184,13 +184,12 @@ func printHeader(outDir string) {
 // Dynamic Naming Engine
 // ---------------------------------------------------------------------------
 
-// FileMeta menyimpan data mentah lagu yang ditarik dari metadatanya
 type FileMeta struct {
 	Title       string
 	Artist      string
 	Album       string
 	TrackNumber int
-	Extension   string // contoh: ".mp3", "mp3", atau ".%(ext)s"
+	Extension   string
 }
 
 // RenameOptions menyimpan status konfigurasi naming milikmu
@@ -277,13 +276,10 @@ func sanitizeBaseName(name string) string {
 }
 
 var (
-	// ErrNoNamerInput indicates that FileMeta contained no usable title, artist, or album.
-	ErrNoNamerInput = errors.New("custom namer received no metadata input")
-	// ErrNoNamingFields indicates that all naming field options (artist, album, title) were false.
+	ErrNoNamerInput   = errors.New("custom namer received no metadata input")
 	ErrNoNamingFields = errors.New("custom namer received no active naming fields")
 )
 
-// generateFilename akan merakit nama file secara dinamis sesuai konfigurasi
 func generateFilename(meta FileMeta, opts RenameOptions) (string, error) {
 	var namerErr error
 
@@ -796,7 +792,6 @@ func drawProgressBar(spinnerIdx int, pct float64, speed, eta, status string) {
 		status = "fetching media…"
 	}
 
-	// format: "  ⠙  ███████░░░░░░░░░░░░░   35%  · 2.4MiB/s  · eta 00:08  │ fetching media…"
 	line := fmt.Sprintf("\r\033[K  %s%s%s  %s%s%s   %s  · %s  · eta %s  %s│%s %s%s%s",
 		colAccent, sp, colReset,
 		colAccent, bar, colReset,
@@ -1060,7 +1055,7 @@ func interactiveWizard(cfg *Config) error {
 	fmt.Printf("\r\n")
 
 	// ── Step 1: URL ─────────────────────────────────────────────────────────
-	urlInput, err := runWizardText("Paste the link (YouTube / Spotify / Qobuz)", "")
+	urlInput, err := runWizardText("Paste the link (YouTube / Spotify / Tidal / Qobuz)", "")
 	if err != nil {
 		return err
 	}
@@ -1071,10 +1066,14 @@ func interactiveWizard(cfg *Config) error {
 
 	fmt.Printf("\r\n")
 
-	// If Qobuz URL is detected, it is audio-first (Hi-Res FLAC / MP3)
-	if isQobuzURL(urlInput) {
-		logSubKV("service", "Qobuz (Hi-Res via Lucida backend)")
-		fmtChoice, err := runCheckbox("Format", []string{"flac (Hi-Res 24-bit lossless)", "mp3 (320k)"}, 0)
+	// If Qobuz or Tidal URL is detected, it is audio-first (Hi-Res FLAC / MP3)
+	if isQobuzURL(urlInput) || isTidalURL(urlInput) {
+		serviceName := "Qobuz"
+		if isTidalURL(urlInput) {
+			serviceName = "Tidal"
+		}
+		logSubKV("service", fmt.Sprintf("%s (Hi-Res via Lucida backend)", serviceName))
+		fmtChoice, err := runCheckbox("Format", []string{"flac (Lossless)", "mp3 (320k)"}, 0)
 		if err != nil {
 			return err
 		}
@@ -1098,7 +1097,7 @@ func interactiveWizard(cfg *Config) error {
 		// ── Step 3: Format ───────────────────────────────────────────────────────
 		var fmtOptions []string
 		if mediaType == "video" {
-			fmtOptions = []string{"mp4", "mkv", "webm", "mov", "original"}
+			fmtOptions = []string{"original", "mp4", "mkv", "webm", "mov"}
 		} else {
 			fmtOptions = []string{"original", "mp3", "m4a", "opus", "flac", "wav", "aac"}
 		}
@@ -1130,7 +1129,7 @@ func interactiveWizard(cfg *Config) error {
 				cfg.Quality = "best"
 				qualOptions = nil
 			} else {
-				qualOptions = []string{"best", "320k", "256k", "192k", "128k", "original"}
+				qualOptions = []string{"best", "original", "320k", "256k", "192k", "128k"}
 			}
 		}
 
@@ -1199,18 +1198,18 @@ Options:
   --country <code>       service/proxy country code (e.g. us, gb, auto)
   --cf-clearance <tok>   Cloudflare clearance cookie for Lucida proxy
   --user-agent <ua>      custom User-Agent string
-  -V, --verbose          show full yt-dlp log stream (no progress bar)
+  -V, --verbose          show full yt-dlp log stream and detailed info
   --debug                implies --verbose, plus stderr dumps on resolve fail
-  --bootstrap            delete cache + re-download yt-dlp and ffmpeg
-  --clean                remove cache dir, exit
+  --bootstrap            clean re-download yt-dlp and ffmpeg
+  --clean                remove cache directory
   -y, --yes              skip end-of-run prompts (for CI/scripting)
-  -m, --mp3              shorthand for -f mp3
-  -v, --mp4              shorthand for -f mp4
-  -n, --dry-run          print resolved yt-dlp argv, don't download
+  -m, --mp3              donwload in mp3
+  -v, --mp4              download in mp4
+  -n, --dry-run          give resolved yt-dlp argv, don't download
   --no-artist            omit artist from output filename
   --no-numbering         omit track numbering in playlist downloads
-  -h, --help             print help with the codex box header
-  --version              print "fetchit 1.0"
+  -h, --help             list command
+  --version              version installed
 
 no args will routed to interactive wizard.`)
 }
@@ -1365,32 +1364,6 @@ func main() {
 	var allSavedFiles []string
 	failedCount := 0
 
-	// Pre-check Lucida availability once if any URL is a Qobuz link
-	lucidaChecked := false
-	lucidaCFBlocked := false
-	for _, u := range cfg.URLs {
-		if isQobuzURL(u) && !lucidaChecked {
-			lucidaChecked = true
-			lucidaClient := newLucidaHTTPClient(cfg)
-			if err := checkLucidaAvailability(lucidaClient, cfg); err != nil {
-				var cfErr lucidaCFError
-				if errors.As(err, &cfErr) {
-					lucidaCFBlocked = true
-					logErr("lucida.to is blocked by Cloudflare — Qobuz downloads are unavailable.")
-					if cfg.Verbose {
-						logSub("Pass --cf-clearance <token> and --user-agent <ua> to bypass the captcha wall.")
-						logSub("Get cf_clearance from your browser's DevTools → Application → Cookies → lucida.to")
-					} else {
-						logSub("")
-					}
-				} else if cfg.Verbose {
-					logWarn(fmt.Sprintf("lucida.to connectivity check: %v — will try anyway", err))
-				}
-			}
-			break
-		}
-	}
-
 	for idx, url := range cfg.URLs {
 		if isSpotifyURL(url) {
 			logPhase(fmt.Sprintf("[%d/%d] Spotify: %s", idx+1, len(cfg.URLs), url))
@@ -1402,16 +1375,19 @@ func main() {
 			continue
 		}
 
+		if isTidalURL(url) {
+			logPhase(fmt.Sprintf("[%d/%d] Tidal: %s", idx+1, len(cfg.URLs), url))
+			saved, tdErr := runTidalDownload(cfg, binDir, url)
+			if tdErr != nil {
+				failedCount++
+			}
+			allSavedFiles = append(allSavedFiles, saved...)
+			continue
+		}
+
 		if isQobuzURL(url) {
 			logPhase(fmt.Sprintf("[%d/%d] Qobuz: %s", idx+1, len(cfg.URLs), url))
-			var saved []string
-			var qbErr error
-			if lucidaCFBlocked {
-				logWarn("lucida.to CF-blocked — routing to official Qobuz API")
-				saved, qbErr = runOfficialQobuzDownload(cfg, binDir, url)
-			} else {
-				saved, qbErr = runQobuzDownload(cfg, binDir, url)
-			}
+			saved, qbErr := runQobuzDownload(cfg, binDir, url)
 			if qbErr != nil {
 				failedCount++
 			}
