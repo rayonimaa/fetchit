@@ -153,10 +153,10 @@ func printHeader(outDir string) {
 		}
 	}
 
-	w := 54
+	w := 56
 	title := ">_ fetchit"
 	line1 := "v1.0 stable"
-	line2 := "customized backend-engine"
+	line2 := "customized backned-engine"
 
 	maxInner := w - 4 // border takes 2 chars on each side + 1 space each: "│ " ... " │"
 	if stringWidth(line2) > maxInner {
@@ -1196,6 +1196,9 @@ Options:
                          audio: best 320 256 192 128 (kbps)
                          (default: best)
   -o, --output <dir>     initial save directory (default: $HOME/Downloads)
+  --country <code>       service/proxy country code (e.g. us, gb, auto)
+  --cf-clearance <tok>   Cloudflare clearance cookie for Lucida proxy
+  --user-agent <ua>      custom User-Agent string
   -V, --verbose          show full yt-dlp log stream (no progress bar)
   --debug                implies --verbose, plus stderr dumps on resolve fail
   --bootstrap            delete cache + re-download yt-dlp and ffmpeg
