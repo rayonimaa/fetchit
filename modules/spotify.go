@@ -1,4 +1,4 @@
-package main
+package modules
 
 import (
 	"bufio"
@@ -849,3 +849,9 @@ func downloadCoverArt(url, destPath string) error {
 	_, err = io.Copy(f, resp.Body)
 	return err
 }
+
+var (
+	IsSpotifyURL       = isSpotifyURL
+	RunSpotifyDownload = runSpotifyDownload
+)
+

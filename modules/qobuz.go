@@ -1,4 +1,4 @@
-package main
+package modules
 
 import (
 	"context"
@@ -1028,3 +1028,14 @@ func runQobuzDownload(cfg *Config, binDir, rawURL string) ([]string, error) {
 
 	return runOfficialQobuzDownload(cfg, binDir, rawURL)
 }
+
+type QobuzURLInfo = qobuzURLInfo
+
+var (
+	IsQobuzURL             = isQobuzURL
+	RunQobuzDownload       = runQobuzDownload
+	ParseQobuzURL          = parseQobuzURL
+	ComputeQobuzRequestSig = computeQobuzRequestSig
+	GetActiveQobuzSession  = getActiveQobuzSession
+)
+

@@ -1,4 +1,4 @@
-package main
+package modules
 
 import (
 	"bufio"
@@ -442,3 +442,12 @@ func runDownload(cfg *Config, binDir, url string) ([]string, error) {
 
 	return savedFiles, nil
 }
+
+var (
+	CheckIsPlaylist          = checkIsPlaylist
+	ResolveMedia             = resolveMedia
+	BuildYtdlpOutputTemplate = buildYtdlpOutputTemplate
+	CleanupIntermediateFiles = cleanupIntermediateFiles
+	RunDownload              = runDownload
+)
+
