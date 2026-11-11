@@ -1100,7 +1100,7 @@ func interactiveWizard(cfg *Config) error {
 		if mediaType == "video" {
 			fmtOptions = []string{"mp4", "mkv", "webm", "mov", "original"}
 		} else {
-			fmtOptions = []string{"mp3", "m4a", "opus", "flac", "wav", "aac", "original"}
+			fmtOptions = []string{"original", "mp3", "m4a", "opus", "flac", "wav", "aac"}
 		}
 		fmtChoice, err := runCheckbox("Format", fmtOptions, 0)
 		if err != nil {
@@ -1123,7 +1123,7 @@ func interactiveWizard(cfg *Config) error {
 		// ── Step 4: Quality ───────────────────────────────────────────────────────
 		var qualOptions []string
 		if mediaType == "video" {
-			qualOptions = []string{"best", "4k", "2k", "1080p", "720p", "480p", "360p", "original"}
+			qualOptions = []string{"best", "original", "4k", "2k", "1080p", "720p", "480p", "360p"}
 		} else {
 			if fmtChoice == "flac" || fmtChoice == "wav" || fmtChoice == "original" {
 				// lossless / original → no re-encoding quality choice
@@ -1205,7 +1205,6 @@ Options:
   -v, --mp4              shorthand for -f mp4
   -n, --dry-run          print resolved yt-dlp argv, don't download
   --no-artist            omit artist from output filename
-  --album                include album name in output filename
   --no-numbering         omit track numbering in playlist downloads
   -h, --help             print help with the codex box header
   --version              print "fetchit 1.0"
@@ -1402,12 +1401,14 @@ func main() {
 
 		if isQobuzURL(url) {
 			logPhase(fmt.Sprintf("[%d/%d] Qobuz: %s", idx+1, len(cfg.URLs), url))
+			var saved []string
+			var qbErr error
 			if lucidaCFBlocked {
-				logErr("skipped — lucida.to failed")
-				failedCount++
-				continue
+				logWarn("lucida.to CF-blocked — routing to official Qobuz API")
+				saved, qbErr = runOfficialQobuzDownload(cfg, binDir, url)
+			} else {
+				saved, qbErr = runQobuzDownload(cfg, binDir, url)
 			}
-			saved, qbErr := runQobuzDownload(cfg, binDir, url)
 			if qbErr != nil {
 				failedCount++
 			}

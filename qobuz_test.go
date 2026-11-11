@@ -94,3 +94,127 @@ func TestCleanupIntermediateFiles(t *testing.T) {
 		t.Errorf("intermediate .jpg file was NOT cleaned up")
 	}
 }
+
+func TestParseQobuzURL(t *testing.T) {
+	tests := []struct {
+		url          string
+		expectedType string
+		expectedID   string
+		expectErr    bool
+	}{
+		{
+			url:          "https://play.qobuz.com/album/0060253765103",
+			expectedType: "album",
+			expectedID:   "0060253765103",
+		},
+		{
+			url:          "https://play.qobuz.com/track/12345678",
+			expectedType: "track",
+			expectedID:   "12345678",
+		},
+		{
+			url:          "https://open.qobuz.com/album/g3jksdl189",
+			expectedType: "album",
+			expectedID:   "g3jksdl189",
+		},
+		{
+			url:          "https://www.qobuz.com/us-en/album/nevermind/0072064244252",
+			expectedType: "album",
+			expectedID:   "0072064244252",
+		},
+		{
+			url:          "https://www.qobuz.com/fr-fr/track/some-slug/998877",
+			expectedType: "track",
+			expectedID:   "998877",
+		},
+		{
+			url:          "http://play.qobuz.com/playlist/9999",
+			expectedType: "playlist",
+			expectedID:   "9999",
+		},
+		{
+			url:          "https://play.qobuz.com/playlist/9999?source=web&tab=tracks",
+			expectedType: "playlist",
+			expectedID:   "9999",
+		},
+		{
+			url:          "https://play.qobuz.com/interpreter/554433",
+			expectedType: "interpreter",
+			expectedID:   "554433",
+		},
+		{
+			url:       "https://open.spotify.com/track/abc",
+			expectErr: true,
+		},
+		{
+			url:       "https://youtube.com/watch?v=123",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			got, err := parseQobuzURL(tt.url)
+			if tt.expectErr {
+				if err == nil {
+					t.Fatalf("expected error for URL %q, got nil", tt.url)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Type != tt.expectedType {
+				t.Errorf("Type = %q, want %q", got.Type, tt.expectedType)
+			}
+			if got.ID != tt.expectedID {
+				t.Errorf("ID = %q, want %q", got.ID, tt.expectedID)
+			}
+		})
+	}
+}
+
+func TestComputeQobuzRequestSig(t *testing.T) {
+	formatID := "27"
+	trackID := int64(123456)
+	ts := "1700000000"
+	secret := "b5a96f62b0821c81ef841cf43c683b58"
+
+	sig := computeQobuzRequestSig(formatID, trackID, ts, secret)
+	if len(sig) != 32 {
+		t.Errorf("expected 32-character hex MD5 signature, got %d chars: %s", len(sig), sig)
+	}
+
+	// Verify deterministic calculation
+	expectedSig := computeQobuzRequestSig(formatID, trackID, ts, secret)
+	if sig != expectedSig {
+		t.Errorf("expected signature %s, got %s", expectedSig, sig)
+	}
+}
+
+func TestGetActiveQobuzSession(t *testing.T) {
+	cfg := &Config{}
+	sess := getActiveQobuzSession(cfg)
+	if sess.AppID == "" {
+		t.Errorf("expected default AppID, got empty")
+	}
+	if sess.AppSecret == "" {
+		t.Errorf("expected default AppSecret, got empty")
+	}
+
+	// Environment variable override
+	t.Setenv("QOBUZ_APP_ID", "custom_id_123")
+	t.Setenv("QOBUZ_APP_SECRET", "custom_secret_456")
+	t.Setenv("QOBUZ_USER_AUTH_TOKEN", "custom_token_789")
+
+	overridden := getActiveQobuzSession(cfg)
+	if overridden.AppID != "custom_id_123" {
+		t.Errorf("AppID = %q, want custom_id_123", overridden.AppID)
+	}
+	if overridden.AppSecret != "custom_secret_456" {
+		t.Errorf("AppSecret = %q, want custom_secret_456", overridden.AppSecret)
+	}
+	if overridden.UserAuthToken != "custom_token_789" {
+		t.Errorf("UserAuthToken = %q, want custom_token_789", overridden.UserAuthToken)
+	}
+}

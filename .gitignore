@@ -12,3 +12,4 @@ dist/
 # Output of the go coverage tool
 *.out
 CODEBASE.md
+.claude/
