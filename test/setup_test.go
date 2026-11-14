@@ -28,4 +28,6 @@ var (
 	parseDashManifest        = modules.ParseDashManifest
 	mapTidalQuality          = modules.MapTidalQuality
 	getTidalCoverURL         = modules.GetTidalCoverURL
+	ParseLinkInput           = modules.ParseLinkInput
+	ParseLinks               = modules.ParseLinks
 )

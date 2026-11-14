@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -143,11 +144,13 @@ var truncateString = TruncateString
 func LogPhase(msg string) {
 	fmt.Printf("  • %s%s%s\n", colBold, msg, colReset)
 }
+
 var logPhase = LogPhase
 
 func LogSub(msg string) {
 	fmt.Printf("    %s%s%s\n", colDim, msg, colReset)
 }
+
 var logSub = LogSub
 
 func LogSubKV(label, val string) {
@@ -157,26 +160,31 @@ func LogSubKV(label, val string) {
 	}
 	fmt.Printf("  │ %s%s %s%s%s\n", colMuted, paddedLabel, colText, val, colReset)
 }
+
 var logSubKV = LogSubKV
 
 func LogTool(argv string) {
 	fmt.Printf("  ↳ %s%s%s\n", colDim, argv, colReset)
 }
+
 var logTool = LogTool
 
 func LogOK(msg string) {
 	fmt.Printf("  ✓ %s%s%s\n", colText, msg, colReset)
 }
+
 var logOK = LogOK
 
 func LogErr(msg string) {
 	fmt.Printf("  ✗ %s%s%s\n", colText, msg, colReset)
 }
+
 var logErr = LogErr
 
 func LogWarn(msg string) {
 	fmt.Printf("  △ %s%s%s\n", colText, msg, colReset)
 }
+
 var logWarn = LogWarn
 
 // Terminal Progress UI
@@ -219,6 +227,7 @@ func DrawProgressBar(spinnerIdx int, pct float64, speed, eta, status string) {
 		colMuted, status, colReset)
 	fmt.Print(line)
 }
+
 var drawProgressBar = DrawProgressBar
 
 func ClearLine() {
@@ -226,6 +235,7 @@ func ClearLine() {
 		fmt.Print("\r\033[K")
 	}
 }
+
 var clearLine = ClearLine
 
 func ParsePercent(s string) float64 {
@@ -237,6 +247,7 @@ func ParsePercent(s string) float64 {
 	}
 	return val
 }
+
 var parsePercent = ParsePercent
 
 // ---------------------------------------------------------------------------
@@ -331,6 +342,7 @@ func RunCheckbox(prompt string, options []string, defaultIdx int) (string, error
 		}
 	}
 }
+
 var runCheckbox = RunCheckbox
 
 func RunWizardText(prompt, defaultValue string) (string, error) {
@@ -351,7 +363,132 @@ func RunWizardText(prompt, defaultValue string) (string, error) {
 	fmt.Printf("  %s✓%s %s: %s%s%s\r\n", colGreen, colReset, prompt, colAccent, text, colReset)
 	return text, nil
 }
+
 var runWizardText = RunWizardText
+
+// ParseLinkInput parses raw inputs containing one or more URLs divided by
+// comma (,), space ( ), or enter/newline (\r, \n), or any combination thereof.
+// It trims whitespace, quotes, markdown/angle brackets, list markers, and
+// deduplicates links while strictly preserving original input sequence.
+func ParseLinkInput(inputs ...string) []string {
+	var rawTokens []string
+	for _, in := range inputs {
+		// Split on comma or any unicode whitespace (including space, \t, \r, \n)
+		parts := strings.FieldsFunc(in, func(r rune) bool {
+			return r == ',' || unicode.IsSpace(r)
+		})
+		rawTokens = append(rawTokens, parts...)
+	}
+
+	var urls []string
+	seen := make(map[string]bool)
+
+	for _, tok := range rawTokens {
+		clean := strings.TrimSpace(tok)
+		// Strip surrounding quotes and brackets
+		clean = strings.Trim(clean, "\"'`<>(),;")
+
+		// Strip list numbers or bullets if attached (e.g. "1.", "2)", "-", "*", "•")
+		clean = strings.TrimLeft(clean, "0123456789.-*)• \t")
+		clean = strings.Trim(clean, "\"'`<>(),;")
+
+		if clean == "" {
+			continue
+		}
+
+		// Ensure token contains at least one character typical of a link/host/ID
+		hasLetterOrDigit := false
+		for _, r := range clean {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				hasLetterOrDigit = true
+				break
+			}
+		}
+		if !hasLetterOrDigit {
+			continue
+		}
+
+		if !seen[clean] {
+			seen[clean] = true
+			urls = append(urls, clean)
+		}
+	}
+	return urls
+}
+
+var ParseLinks = ParseLinkInput
+
+// RunWizardLinkInput prompts the user to enter or paste one or more links.
+// It handles single links, comma/space divided links, and multiline pasted blocks (enter-divided).
+func RunWizardLinkInput(prompt string) ([]string, error) {
+	if !isTerminalStdin {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil && len(data) == 0 {
+			return nil, errors.New("no URL provided")
+		}
+		urls := ParseLinkInput(string(data))
+		if len(urls) == 0 {
+			return nil, errors.New("no URL provided")
+		}
+		return urls, nil
+	}
+
+	// Enable bracketed paste mode if in a supported terminal
+	if isTerminalStdout {
+		fmt.Print("\x1b[?2004h")
+		defer fmt.Print("\x1b[?2004l")
+	}
+
+	fmt.Printf("  %s•%s %s: ", colBold, colReset, prompt)
+
+	reader := bufio.NewReader(os.Stdin)
+	firstLine, err := reader.ReadString('\n')
+	if err != nil && len(firstLine) == 0 {
+		return nil, errors.New("no URL provided")
+	}
+
+	var builder strings.Builder
+	builder.WriteString(firstLine)
+
+	// In case of a multiline paste, the remaining lines are buffered in stdin.
+	time.Sleep(25 * time.Millisecond)
+	for reader.Buffered() > 0 {
+		line, err := reader.ReadString('\n')
+		builder.WriteString(" ")
+		builder.WriteString(line)
+		if err != nil {
+			break
+		}
+	}
+
+	rawText := builder.String()
+	// Strip bracketed paste escape sequences if present (\x1b[200~ and \x1b[201~)
+	rawText = strings.ReplaceAll(rawText, "\x1b[200~", "")
+	rawText = strings.ReplaceAll(rawText, "\x1b[201~", "")
+
+	urls := ParseLinkInput(rawText)
+	if len(urls) == 0 {
+		return nil, errors.New("no URL provided")
+	}
+
+	if len(urls) == 1 {
+		fmt.Printf("  %s✓%s %s: %s%s%s\r\n", colGreen, colReset, prompt, colAccent, urls[0], colReset)
+	} else {
+		fmt.Printf("  %s✓%s %s: %s%d multiple-links detected (batch initiated)%s\r\n", colGreen, colReset, prompt, colAccent, len(urls), colReset)
+		for i, u := range urls {
+			if i < 5 {
+				fmt.Printf("    %s%d)%s %s\r\n", colDim, i+1, colReset, u)
+			} else if i == 5 {
+				fmt.Printf("    %s... and %d and else...%s\r\n", colDim, len(urls)-5, colReset)
+				break
+			}
+		}
+	}
+
+	return urls, nil
+}
+
+var runWizardLinkInput = RunWizardLinkInput
 
 func RunMultiCheckbox(prompt string, options []string, checked []bool) ([]bool, error) {
 	if !isTerminalStdin || !isTerminalStdout {
@@ -458,6 +595,7 @@ func RunMultiCheckbox(prompt string, options []string, checked []bool) ([]bool, 
 		}
 	}
 }
+
 var runMultiCheckbox = RunMultiCheckbox
 
 // ---------------------------------------------------------------------------

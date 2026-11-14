@@ -209,6 +209,9 @@ var (
 	runDownload        = modules.RunDownload
 	resolveMedia       = modules.ResolveMedia
 	checkIsPlaylist    = modules.CheckIsPlaylist
+	parseLinkInput     = modules.ParseLinkInput
+	parseLinks         = modules.ParseLinks
+	runWizardLinkInput = modules.RunWizardLinkInput
 )
 
 func getBinDir() (string, error) {
@@ -832,24 +835,42 @@ func interactiveWizard(cfg *Config) error {
 	fmt.Printf("\r\n")
 
 	// ── Step 1: URL ─────────────────────────────────────────────────────────
-	urlInput, err := runWizardText("Paste the link (YouTube / Spotify / Tidal / Qobuz)", "")
+	urls, err := runWizardLinkInput("Paste link(s) (YouTube / Spotify / Tidal / Qobuz)")
 	if err != nil {
 		return err
 	}
-	if urlInput == "" {
+	if len(urls) == 0 {
 		return errors.New("no URL provided")
 	}
-	cfg.URLs = []string{urlInput}
+	cfg.URLs = urls
 
 	fmt.Printf("\r\n")
 
-	// If Qobuz or Tidal URL is detected, it is audio-first (Hi-Res FLAC / MP3)
-	if isQobuzURL(urlInput) || isTidalURL(urlInput) {
-		serviceName := "Qobuz"
-		if isTidalURL(urlInput) {
-			serviceName = "Tidal"
+	// Check if all URLs in batch are audio-only Hi-Res services (Qobuz / Tidal)
+	allHiRes := true
+	hiResService := ""
+	for _, u := range cfg.URLs {
+		if isQobuzURL(u) {
+			if hiResService == "" {
+				hiResService = "Qobuz"
+			} else if hiResService != "Qobuz" {
+				hiResService = "Qobuz/Tidal"
+			}
+		} else if isTidalURL(u) {
+			if hiResService == "" {
+				hiResService = "Tidal"
+			} else if hiResService != "Tidal" {
+				hiResService = "Qobuz/Tidal"
+			}
+		} else {
+			allHiRes = false
+			break
 		}
-		logSubKV("service", fmt.Sprintf("%s (Hi-Res via Lucida backend)", serviceName))
+	}
+
+	// If only Qobuz or Tidal URLs are detected, it is audio-first (Hi-Res FLAC / MP3)
+	if allHiRes {
+		logSubKV("service", fmt.Sprintf("%s (Hi-Res via Lucida backend)", hiResService))
 		fmtChoice, err := runCheckbox("Format", []string{"flac (Lossless)", "mp3 (320k)"}, 0)
 		if err != nil {
 			return err
@@ -1127,7 +1148,18 @@ func main() {
 		return
 	}
 
-	cfg.URLs = fs.Args()
+	var rawInputs []string
+	if len(fs.Args()) > 0 {
+		rawInputs = fs.Args()
+	} else if !isTerminalStdin {
+		// Non-interactive / piped stdin (e.g. cat links.txt | fetchit)
+		data, err := io.ReadAll(os.Stdin)
+		if err == nil && len(data) > 0 {
+			rawInputs = []string{string(data)}
+		}
+	}
+
+	cfg.URLs = parseLinkInput(rawInputs...)
 	if len(cfg.URLs) == 0 {
 		if err := interactiveWizard(cfg); err != nil {
 			logErr(fmt.Sprintf("wizard failed: %v", err))

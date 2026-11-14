@@ -779,11 +779,12 @@ func runSpotifyDownload(cfg *Config, binDir, url string) ([]string, error) {
 		subDir = sanitizeFilename(playlistName)
 	}
 
-	// If format is a video format, switch to mp3 for Spotify
-	formatLower := strings.ToLower(cfg.Format)
+	// If format is a video format, switch to mp3 for Spotify without mutating global cfg
+	spotifyCfg := *cfg
+	formatLower := strings.ToLower(spotifyCfg.Format)
 	if !isAudioFormat(formatLower) {
-		logSub("Spotify mode: using mp3 format (audio-only)")
-		cfg.Format = "mp3"
+		logSub("Spotify: using mp3 format (audio-only)")
+		spotifyCfg.Format = "mp3"
 	}
 
 	// Download each track
@@ -805,7 +806,7 @@ func runSpotifyDownload(cfg *Config, binDir, url string) ([]string, error) {
 			logSubKV("album", track.Album)
 		}
 
-		saved, err := downloadSpotifyTrack(cfg, binDir, track, i+1, len(tracks), subDir)
+		saved, err := downloadSpotifyTrack(&spotifyCfg, binDir, track, i+1, len(tracks), subDir)
 		if err != nil {
 			logErr(fmt.Sprintf("failed: %v", err))
 			failCount++
@@ -854,4 +855,3 @@ var (
 	IsSpotifyURL       = isSpotifyURL
 	RunSpotifyDownload = runSpotifyDownload
 )
-
