@@ -18,10 +18,11 @@ import (
 	"sync"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/ulikunitz/xz"
 	"golang.org/x/term"
+
+	"fetchit/modules"
 )
 
 // ANSI color palette
@@ -181,258 +182,37 @@ func printHeader(outDir string) {
 }
 
 // ---------------------------------------------------------------------------
-// Dynamic Naming Engine
+// Module Type Aliases & Bindings
 // ---------------------------------------------------------------------------
 
-type FileMeta struct {
-	Title       string
-	Artist      string
-	Album       string
-	TrackNumber int
-	Extension   string
-}
-
-// RenameOptions menyimpan status konfigurasi naming milikmu
-type RenameOptions struct {
-	IncludeArtist    bool
-	IncludeAlbum     bool
-	IncludeTitle     bool
-	IsPlaylist       bool
-	IncludeNumbering bool
-}
-
-// DefaultRenameOptions mengembalikan konfigurasi default yang direkomendasikan
-func DefaultRenameOptions(isPlaylist bool) RenameOptions {
-	return RenameOptions{
-		IncludeArtist:    true,
-		IncludeAlbum:     false,
-		IncludeTitle:     true,
-		IsPlaylist:       isPlaylist,
-		IncludeNumbering: isPlaylist,
-	}
-}
-
-// Windows-reserved device names (case-insensitive base name)
-var reservedDeviceNames = map[string]bool{
-	"CON": true, "PRN": true, "AUX": true, "NUL": true,
-	"COM1": true, "COM2": true, "COM3": true, "COM4": true,
-	"COM5": true, "COM6": true, "COM7": true, "COM8": true, "COM9": true,
-	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true,
-	"LPT5": true, "LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
-}
-
-// sanitizeBaseName membersihkan karakter ilegal lintas OS (Windows, Linux, macOS),
-// menghapus karakter kontrol tersembunyi, menormalkan spasi,
-// menghapus trailing dot/space yang dilarang Windows, dan menangani nama DOS reserved.
-func sanitizeBaseName(name string) string {
-	// 1. Bersihkan karakter terlarang OS: < > : " / \ | ? *
-	invalidChars := []string{"<", ">", ":", "\"", "/", "\\", "|", "?", "*"}
-	clean := name
-	for _, ch := range invalidChars {
-		clean = strings.ReplaceAll(clean, ch, "_")
-	}
-
-	// 2. Bersihkan karakter kontrol non-printable (0x00 - 0x1f, 0x7f)
-	var b strings.Builder
-	for _, r := range clean {
-		if r < 32 || r == 127 {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	clean = b.String()
-
-	// 3. Normalisasi spasi dan underscore yang bertumpuk
-	clean = strings.Join(strings.Fields(clean), " ")
-
-	// 4. Hapus spasi dan titik di akhir nama (Windows melarang trailing dot/space)
-	clean = strings.TrimRight(clean, " ._")
-	clean = strings.TrimLeft(clean, " ")
-
-	// 5. Fallback pengamanan jika nama kosong setelah disanitasi
-	if clean == "" {
-		clean = "Track"
-	}
-
-	// 6. Tangani nama file reserved Windows (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
-	upperBase := strings.ToUpper(clean)
-	if reservedDeviceNames[upperBase] {
-		clean = "_" + clean
-	}
-
-	// 7. Batasi panjang maksimal (240 bytes) agar aman di batas 255 bytes Linux/Windows
-	if len(clean) > 240 {
-		for len(clean) > 240 {
-			_, size := utf8.DecodeLastRuneInString(clean)
-			if size == 0 {
-				break
-			}
-			clean = clean[:len(clean)-size]
-		}
-		clean = strings.TrimRight(clean, " ._")
-	}
-
-	return clean
-}
-
-var (
-	ErrNoNamerInput   = errors.New("custom namer received no metadata input")
-	ErrNoNamingFields = errors.New("custom namer received no active naming fields")
+type (
+	FileMeta      = modules.FileMeta
+	RenameOptions = modules.RenameOptions
+	Config        = modules.Config
 )
 
-func generateFilename(meta FileMeta, opts RenameOptions) (string, error) {
-	var namerErr error
+var (
+	DefaultRenameOptions = modules.DefaultRenameOptions
+	ErrNoNamerInput      = modules.ErrNoNamerInput
+	ErrNoNamingFields    = modules.ErrNoNamingFields
+	generateFilename     = modules.GenerateFilename
+	sanitizeBaseName     = modules.SanitizeBaseName
+	resolvePath          = modules.ResolvePath
+	moveFile             = modules.MoveFile
 
-	// Fallback pengamanan jika tidak mencentang apa pun
-	if !opts.IncludeTitle && !opts.IncludeArtist && !opts.IncludeAlbum {
-		opts.IncludeTitle = true
-		namerErr = ErrNoNamingFields
-	}
-
-	// Rapikan setiap input metadata
-	artist := strings.TrimSpace(meta.Artist)
-	album := strings.TrimSpace(meta.Album)
-	title := strings.TrimSpace(meta.Title)
-
-	var parts []string
-	// Urutan: Artist - Album - Title
-	if opts.IncludeArtist && artist != "" {
-		parts = append(parts, artist)
-	}
-	if opts.IncludeAlbum && album != "" {
-		parts = append(parts, album)
-	}
-	if opts.IncludeTitle && title != "" {
-		parts = append(parts, title)
-	}
-
-	var baseName string
-	if len(parts) == 0 {
-		namerErr = ErrNoNamerInput
-		if meta.TrackNumber > 0 {
-			baseName = fmt.Sprintf("Track %d", meta.TrackNumber)
-		} else {
-			baseName = "Track"
-		}
-	} else {
-		// Gabungkan bagian-bagian yang terpilih
-		baseName = strings.Join(parts, " - ")
-	}
-
-	// Jika ini playlist dan kamu mencentang penomoran di depan
-	if opts.IsPlaylist && opts.IncludeNumbering && meta.TrackNumber > 0 {
-		// Format dua digit (01, 02, dst)
-		baseName = fmt.Sprintf("%02d - %s", meta.TrackNumber, baseName)
-	}
-
-	// Sanitasi: Bersihkan karakter yang dilarang oleh OS
-	baseName = sanitizeBaseName(baseName)
-
-	// Format ekstensi dengan titik pemisah jika belum ada
-	ext := strings.TrimSpace(meta.Extension)
-	if ext != "" && !strings.HasPrefix(ext, ".") {
-		ext = "." + ext
-	}
-
-	return baseName + ext, namerErr
-}
-
-// resolvePath normalizes, unquotes, expands env vars and ~, and returns an absolute clean path.
-func resolvePath(p string) string {
-	clean := strings.TrimSpace(p)
-	clean = strings.Trim(clean, "\"'")
-	if clean == "" {
-		return ""
-	}
-	clean = os.ExpandEnv(clean)
-
-	if clean == "~" || strings.HasPrefix(clean, "~/") || strings.HasPrefix(clean, `~\`) {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			if clean == "~" {
-				clean = home
-			} else {
-				clean = filepath.Join(home, clean[2:])
-			}
-		}
-	}
-
-	if abs, err := filepath.Abs(clean); err == nil {
-		return filepath.Clean(abs)
-	}
-	return filepath.Clean(clean)
-}
-
-// moveFile moves a file from src to dest. It attempts os.Rename first, and falls back to
-// copy+remove if crossing filesystem or drive volume boundaries (common on Windows).
-func moveFile(src, dest string) error {
-	if err := os.Rename(src, dest); err == nil {
-		return nil
-	}
-
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	srcInfo, err := srcFile.Stat()
-	if err != nil {
-		return err
-	}
-
-	destFile, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
-	if err != nil {
-		return err
-	}
-
-	if _, err := io.Copy(destFile, srcFile); err != nil {
-		destFile.Close()
-		_ = os.Remove(dest)
-		return err
-	}
-
-	if err := destFile.Sync(); err != nil {
-		destFile.Close()
-		_ = os.Remove(dest)
-		return err
-	}
-
-	if err := destFile.Close(); err != nil {
-		_ = os.Remove(dest)
-		return err
-	}
-
-	// Windows requires closing srcFile before deleting it
-	srcFile.Close()
-
-	if err := os.Remove(src); err != nil {
-		return fmt.Errorf("copied to %s but failed to remove original %s: %w", dest, src, err)
-	}
-
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// Configuration & Dependency Management
-// ---------------------------------------------------------------------------
-
-type Config struct {
-	Format            string
-	Quality           string
-	OutputDir         string
-	Verbose           bool
-	Debug             bool
-	Bootstrap         bool
-	Clean             bool
-	AssumeYes         bool
-	DryRun            bool
-	URLs              []string
-	NamingOpts        RenameOptions
-	ExplicitNumbering bool
-	Country           string
-	CFClearance       string
-	UserAgent         string
-}
+	isSpotifyURL       = modules.IsSpotifyURL
+	runSpotifyDownload = modules.RunSpotifyDownload
+	isTidalURL         = modules.IsTidalURL
+	runTidalDownload   = modules.RunTidalDownload
+	isQobuzURL         = modules.IsQobuzURL
+	runQobuzDownload   = modules.RunQobuzDownload
+	runDownload        = modules.RunDownload
+	resolveMedia       = modules.ResolveMedia
+	checkIsPlaylist    = modules.CheckIsPlaylist
+	parseLinkInput     = modules.ParseLinkInput
+	parseLinks         = modules.ParseLinks
+	runWizardLinkInput = modules.RunWizardLinkInput
+)
 
 func getBinDir() (string, error) {
 	if custom := os.Getenv("FETCHIT_HOME"); custom != "" {
@@ -1055,24 +835,42 @@ func interactiveWizard(cfg *Config) error {
 	fmt.Printf("\r\n")
 
 	// ── Step 1: URL ─────────────────────────────────────────────────────────
-	urlInput, err := runWizardText("Paste the link (YouTube / Spotify / Tidal / Qobuz)", "")
+	urls, err := runWizardLinkInput("Paste link(s) (YouTube / Spotify / Tidal / Qobuz)")
 	if err != nil {
 		return err
 	}
-	if urlInput == "" {
+	if len(urls) == 0 {
 		return errors.New("no URL provided")
 	}
-	cfg.URLs = []string{urlInput}
+	cfg.URLs = urls
 
 	fmt.Printf("\r\n")
 
-	// If Qobuz or Tidal URL is detected, it is audio-first (Hi-Res FLAC / MP3)
-	if isQobuzURL(urlInput) || isTidalURL(urlInput) {
-		serviceName := "Qobuz"
-		if isTidalURL(urlInput) {
-			serviceName = "Tidal"
+	// Check if all URLs in batch are audio-only Hi-Res services (Qobuz / Tidal)
+	allHiRes := true
+	hiResService := ""
+	for _, u := range cfg.URLs {
+		if isQobuzURL(u) {
+			if hiResService == "" {
+				hiResService = "Qobuz"
+			} else if hiResService != "Qobuz" {
+				hiResService = "Qobuz/Tidal"
+			}
+		} else if isTidalURL(u) {
+			if hiResService == "" {
+				hiResService = "Tidal"
+			} else if hiResService != "Tidal" {
+				hiResService = "Qobuz/Tidal"
+			}
+		} else {
+			allHiRes = false
+			break
 		}
-		logSubKV("service", fmt.Sprintf("%s (Hi-Res via Lucida backend)", serviceName))
+	}
+
+	// If only Qobuz or Tidal URLs are detected, it is audio-first (Hi-Res FLAC / MP3)
+	if allHiRes {
+		logSubKV("service", fmt.Sprintf("%s (Hi-Res via Lucida backend)", hiResService))
 		fmtChoice, err := runCheckbox("Format", []string{"flac (Lossless)", "mp3 (320k)"}, 0)
 		if err != nil {
 			return err
@@ -1350,7 +1148,18 @@ func main() {
 		return
 	}
 
-	cfg.URLs = fs.Args()
+	var rawInputs []string
+	if len(fs.Args()) > 0 {
+		rawInputs = fs.Args()
+	} else if !isTerminalStdin {
+		// Non-interactive / piped stdin (e.g. cat links.txt | fetchit)
+		data, err := io.ReadAll(os.Stdin)
+		if err == nil && len(data) > 0 {
+			rawInputs = []string{string(data)}
+		}
+	}
+
+	cfg.URLs = parseLinkInput(rawInputs...)
 	if len(cfg.URLs) == 0 {
 		if err := interactiveWizard(cfg); err != nil {
 			logErr(fmt.Sprintf("wizard failed: %v", err))

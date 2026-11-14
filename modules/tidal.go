@@ -1,4 +1,4 @@
-package main
+package modules
 
 import (
 	"encoding/base64"
@@ -1028,3 +1028,15 @@ func runTidalDownload(cfg *Config, binDir, rawURL string) ([]string, error) {
 
 	return runOfficialTidalDownload(cfg, binDir, rawURL)
 }
+
+type TidalURLInfo = tidalURLInfo
+
+var (
+	IsTidalURL        = isTidalURL
+	RunTidalDownload  = runTidalDownload
+	ParseTidalURL     = parseTidalURL
+	ParseDashManifest = parseDashManifest
+	MapTidalQuality   = mapTidalQuality
+	GetTidalCoverURL  = getTidalCoverURL
+)
+
